@@ -158,7 +158,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let chars: Vec<char> = content.chars().collect();
     let before: String = chars[..cursor_pos].iter().collect();
     let cursor_char: String = chars.get(cursor_pos).copied().unwrap_or(' ').to_string();
-    let after: String = chars[cursor_pos + 1.min(chars.len() - cursor_pos)..].iter().collect();
+    let after: String = chars.get(cursor_pos + 1..).unwrap_or(&[]).iter().collect();
 
     let title = if app.is_running { " Input (waiting...) " } else { " Input " };
 

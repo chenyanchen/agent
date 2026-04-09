@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use futures::StreamExt;
 
@@ -19,8 +19,9 @@ where
 {
     model: M,
     guard: G,
+    #[allow(dead_code)]
     storage: S,
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: BTreeMap<String, Box<dyn Tool>>,
     system_prompt: String,
     messages: Vec<Message>,
 }
@@ -39,18 +40,18 @@ where
         // Add user message to history
         self.messages.push(Message::User { content: user_input.to_string() });
 
-        loop {
-            // Build tool definitions from registered tools
-            let tool_definitions: Vec<ToolDefinition> = self
-                .tools
-                .values()
-                .map(|t| ToolDefinition {
-                    name: t.name().to_string(),
-                    description: t.description().to_string(),
-                    parameters: t.schema(),
-                })
-                .collect();
+        // Build tool definitions once — tools don't change during a run.
+        let tool_definitions: Vec<ToolDefinition> = self
+            .tools
+            .values()
+            .map(|t| ToolDefinition {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.schema(),
+            })
+            .collect();
 
+        loop {
             // Build request
             let request = Request {
                 system: if self.system_prompt.is_empty() {
@@ -59,7 +60,7 @@ where
                     Some(self.system_prompt.clone())
                 },
                 messages: self.messages.clone(),
-                tools: tool_definitions,
+                tools: tool_definitions.clone(),
                 temperature: None,
                 max_tokens: None,
             };
@@ -249,7 +250,7 @@ where
     model: Option<M>,
     guard: Option<G>,
     storage: Option<S>,
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: BTreeMap<String, Box<dyn Tool>>,
     system_prompt: String,
 }
 
@@ -264,7 +265,7 @@ where
             model: None,
             guard: None,
             storage: None,
-            tools: HashMap::new(),
+            tools: BTreeMap::new(),
             system_prompt: String::new(),
         }
     }

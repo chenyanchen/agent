@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use agent_core::{Agent, AgentEvent, AutoGuard, Handler, MemoryStorage, OpenAIModel};
 use agent_tools::{EditFileTool, GlobTool, GrepTool, ReadFileTool, ShellTool, WriteFileTool};
 
-use crate::config::{Config, GuardMode};
+use crate::config::Config;
 use crate::input::InputBuffer;
 use crate::ui::{self, ChatEntry};
 
@@ -84,70 +84,36 @@ impl App {
 
             let model = OpenAIModel::with_config(model_id, oai_cfg);
 
-            match guard_mode {
-                GuardMode::Auto => {
-                    let guard = AutoGuard;
-                    let mut agent = Agent::builder()
-                        .model(model)
-                        .guard(guard)
-                        .storage(MemoryStorage::new())
-                        .system_prompt(&system_prompt)
-                        .tool(ShellTool)
-                        .tool(ReadFileTool)
-                        .tool(WriteFileTool)
-                        .tool(EditFileTool)
-                        .tool(GlobTool)
-                        .tool(GrepTool)
-                        .build();
+            // Both Auto and Confirm use AutoGuard in TUI mode; interactive
+            // confirmation is not yet implemented (TuiHandler always confirms).
+            let _ = guard_mode;
+            let guard = AutoGuard;
+            let mut agent = Agent::builder()
+                .model(model)
+                .guard(guard)
+                .storage(MemoryStorage::new())
+                .system_prompt(&system_prompt)
+                .tool(ShellTool)
+                .tool(ReadFileTool)
+                .tool(WriteFileTool)
+                .tool(EditFileTool)
+                .tool(GlobTool)
+                .tool(GrepTool)
+                .build();
 
-                    let handler = TuiHandler { tx: event_tx_clone.clone() };
-                    while let Some(user_input) = input_rx.recv().await {
-                        if let Err(e) = agent.run(&user_input, &handler).await {
-                            let _ = event_tx_clone.send(AgentEvent::TurnComplete {
-                                usage: agent_core::Usage::default(),
-                            });
-                            // Surface the error as a chat entry via a special path;
-                            // we encode it into a ToolCallDenied so app can detect it.
-                            let _ = event_tx_clone.send(AgentEvent::ToolCallDenied {
-                                id: "__error__".into(),
-                                name: "__error__".into(),
-                                reason: e.to_string(),
-                            });
-                        }
-                    }
-                }
-                GuardMode::Confirm => {
-                    // Use TuiHandler for confirmation (auto-confirm in TUI mode
-                    // since we can't easily do interactive confirms without a
-                    // separate confirmation widget — prompt confirm via a
-                    // passthrough handler that always confirms).
-                    let guard = AutoGuard;
-                    let mut agent = Agent::builder()
-                        .model(model)
-                        .guard(guard)
-                        .storage(MemoryStorage::new())
-                        .system_prompt(&system_prompt)
-                        .tool(ShellTool)
-                        .tool(ReadFileTool)
-                        .tool(WriteFileTool)
-                        .tool(EditFileTool)
-                        .tool(GlobTool)
-                        .tool(GrepTool)
-                        .build();
-
-                    let handler = TuiHandler { tx: event_tx_clone.clone() };
-                    while let Some(user_input) = input_rx.recv().await {
-                        if let Err(e) = agent.run(&user_input, &handler).await {
-                            let _ = event_tx_clone.send(AgentEvent::TurnComplete {
-                                usage: agent_core::Usage::default(),
-                            });
-                            let _ = event_tx_clone.send(AgentEvent::ToolCallDenied {
-                                id: "__error__".into(),
-                                name: "__error__".into(),
-                                reason: e.to_string(),
-                            });
-                        }
-                    }
+            let handler = TuiHandler { tx: event_tx_clone.clone() };
+            while let Some(user_input) = input_rx.recv().await {
+                if let Err(e) = agent.run(&user_input, &handler).await {
+                    let _ = event_tx_clone.send(AgentEvent::TurnComplete {
+                        usage: agent_core::Usage::default(),
+                    });
+                    // Surface the error as a chat entry via a special path;
+                    // we encode it into a ToolCallDenied so app can detect it.
+                    let _ = event_tx_clone.send(AgentEvent::ToolCallDenied {
+                        id: "__error__".into(),
+                        name: "__error__".into(),
+                        reason: e.to_string(),
+                    });
                 }
             }
         });
