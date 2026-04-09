@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod error;
 pub mod event;
 pub mod guard;
@@ -7,6 +8,7 @@ pub mod model;
 pub mod storage;
 pub mod tool;
 
+pub use agent::Agent;
 pub use error::Error;
 pub use event::{Event, Response, StreamResponse, Usage};
 pub use guard::{AutoGuard, ConfirmGuard, Decision, Guard};
