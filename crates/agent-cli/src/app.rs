@@ -194,8 +194,8 @@ async fn run_loop(
 
         // Poll for terminal input with a short timeout so we stay responsive
         // to both keyboard events and agent streaming events.
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()? {
                 match (key.code, key.modifiers) {
                     // Quit on Ctrl+C
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -234,7 +234,6 @@ async fn run_loop(
                     _ => {}
                 }
             }
-        }
 
         if app.should_quit {
             break;

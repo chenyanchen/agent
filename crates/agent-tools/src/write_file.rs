@@ -38,13 +38,12 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Tool("missing 'content' field".to_string()))?;
 
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = std::path::Path::new(path).parent()
+            && !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent)
                     .await
                     .map_err(|e| Error::Tool(format!("failed to create directories: {e}")))?;
             }
-        }
 
         tokio::fs::write(path, content)
             .await

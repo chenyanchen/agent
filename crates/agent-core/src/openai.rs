@@ -220,11 +220,10 @@ impl Model for OpenAIModel {
                             let delta = choice.delta;
 
                             // Text delta
-                            if let Some(content) = delta.content {
-                                if !content.is_empty() {
+                            if let Some(content) = delta.content
+                                && !content.is_empty() {
                                     let _ = tx.send(Event::TextDelta(content));
                                 }
-                            }
 
                             // Tool call chunks
                             if let Some(tc_chunks) = delta.tool_calls {
@@ -246,8 +245,8 @@ impl Model for OpenAIModel {
                                         let _ = tx.send(Event::ToolCallBegin { id, name });
                                     } else if let Some(func) = tc_chunk.function {
                                         // Subsequent chunk — arguments delta.
-                                        if let Some(args_delta) = func.arguments {
-                                            if let Some((id, _, accumulated)) =
+                                        if let Some(args_delta) = func.arguments
+                                            && let Some((id, _, accumulated)) =
                                                 pending.get_mut(&index)
                                             {
                                                 accumulated.push_str(&args_delta);
@@ -256,7 +255,6 @@ impl Model for OpenAIModel {
                                                     arguments_delta: args_delta,
                                                 });
                                             }
-                                        }
                                     }
                                 }
                             }

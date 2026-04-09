@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 // ── Top-level Config ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub model: ModelConfig,
@@ -12,15 +13,6 @@ pub struct Config {
     pub system_prompt: Option<String>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            model: ModelConfig::default(),
-            guard: GuardConfig::default(),
-            system_prompt: None,
-        }
-    }
-}
 
 impl Config {
     /// Load config from `~/.agent/config.toml`.
