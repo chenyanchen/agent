@@ -8,6 +8,12 @@ pub mod model;
 pub mod storage;
 pub mod tool;
 
+#[cfg(feature = "openai")]
+pub mod openai;
+
+#[cfg(feature = "openai")]
+pub use openai::OpenAIModel;
+
 pub use agent::Agent;
 pub use error::Error;
 pub use event::{Event, Response, StreamResponse, Usage};
