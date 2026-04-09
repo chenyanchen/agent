@@ -60,7 +60,10 @@ impl StreamResponse {
                     }
                     tool_call_map.insert(id, (name, String::new()));
                 }
-                Event::ToolCallDelta { id, arguments_delta } => {
+                Event::ToolCallDelta {
+                    id,
+                    arguments_delta,
+                } => {
                     if let Some((_, args)) = tool_call_map.get_mut(&id) {
                         args.push_str(&arguments_delta);
                     }
@@ -154,8 +157,12 @@ mod tests {
                 id: "call_1".to_string(),
                 arguments_delta: r#""London"}"#.to_string(),
             },
-            Event::ToolCallEnd { id: "call_1".to_string() },
-            Event::Done { usage: Usage::default() },
+            Event::ToolCallEnd {
+                id: "call_1".to_string(),
+            },
+            Event::Done {
+                usage: Usage::default(),
+            },
         ];
 
         let stream = StreamResponse::from_events(events);

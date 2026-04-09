@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 
 // ── Top-level Config ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub model: ModelConfig,
@@ -12,7 +11,6 @@ pub struct Config {
     #[serde(default)]
     pub system_prompt: Option<String>,
 }
-
 
 impl Config {
     /// Load config from `~/.agent/config.toml`.
@@ -116,7 +114,10 @@ mode = "auto"
         assert_eq!(cfg.model.api_key.as_deref(), Some("sk-test"));
         assert_eq!(cfg.model.api_base.as_deref(), Some("https://my.proxy/v1"));
         assert_eq!(cfg.guard.mode, GuardMode::Auto);
-        assert_eq!(cfg.system_prompt.as_deref(), Some("You are a helpful assistant."));
+        assert_eq!(
+            cfg.system_prompt.as_deref(),
+            Some("You are a helpful assistant.")
+        );
     }
 
     #[test]

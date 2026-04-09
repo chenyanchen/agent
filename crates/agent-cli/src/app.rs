@@ -7,8 +7,8 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use agent_core::{Agent, AgentEvent, AutoGuard, Handler, MemoryStorage, OpenAIModel};
@@ -101,7 +101,9 @@ impl App {
                 .tool(GrepTool)
                 .build();
 
-            let handler = TuiHandler { tx: event_tx_clone.clone() };
+            let handler = TuiHandler {
+                tx: event_tx_clone.clone(),
+            };
             while let Some(user_input) = input_rx.recv().await {
                 if let Err(e) = agent.run(&user_input, &handler).await {
                     let _ = event_tx_clone.send(AgentEvent::TurnComplete {
@@ -161,45 +163,46 @@ async fn run_loop(
         // Poll for terminal input with a short timeout so we stay responsive
         // to both keyboard events and agent streaming events.
         if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()? {
-                match (key.code, key.modifiers) {
-                    // Quit on Ctrl+C
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        app.should_quit = true;
-                    }
-                    // Submit on Enter (only when not already running)
-                    (KeyCode::Enter, _) => {
-                        if !app.is_running && !app.input.is_empty() {
-                            let text = app.input.take();
-                            app.chat_history.push(ChatEntry::User(text.clone()));
-                            app.is_running = true;
-                            app.scroll_offset = 0;
-                            let _ = input_tx.send(text);
-                        }
-                    }
-                    // Text editing
-                    (KeyCode::Char(ch), _) => {
-                        app.input.insert(ch);
-                    }
-                    (KeyCode::Backspace, _) => {
-                        app.input.backspace();
-                    }
-                    (KeyCode::Left, _) => {
-                        app.input.move_left();
-                    }
-                    (KeyCode::Right, _) => {
-                        app.input.move_right();
-                    }
-                    // Scroll chat history
-                    (KeyCode::Up, _) | (KeyCode::PageUp, _) => {
-                        app.scroll_offset = app.scroll_offset.saturating_add(3);
-                    }
-                    (KeyCode::Down, _) | (KeyCode::PageDown, _) => {
-                        app.scroll_offset = app.scroll_offset.saturating_sub(3);
-                    }
-                    _ => {}
+            && let Event::Key(key) = event::read()?
+        {
+            match (key.code, key.modifiers) {
+                // Quit on Ctrl+C
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    app.should_quit = true;
                 }
+                // Submit on Enter (only when not already running)
+                (KeyCode::Enter, _) => {
+                    if !app.is_running && !app.input.is_empty() {
+                        let text = app.input.take();
+                        app.chat_history.push(ChatEntry::User(text.clone()));
+                        app.is_running = true;
+                        app.scroll_offset = 0;
+                        let _ = input_tx.send(text);
+                    }
+                }
+                // Text editing
+                (KeyCode::Char(ch), _) => {
+                    app.input.insert(ch);
+                }
+                (KeyCode::Backspace, _) => {
+                    app.input.backspace();
+                }
+                (KeyCode::Left, _) => {
+                    app.input.move_left();
+                }
+                (KeyCode::Right, _) => {
+                    app.input.move_right();
+                }
+                // Scroll chat history
+                (KeyCode::Up, _) | (KeyCode::PageUp, _) => {
+                    app.scroll_offset = app.scroll_offset.saturating_add(3);
+                }
+                (KeyCode::Down, _) | (KeyCode::PageDown, _) => {
+                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                }
+                _ => {}
             }
+        }
 
         if app.should_quit {
             break;
@@ -215,8 +218,11 @@ fn handle_agent_event(app: &mut App, event: AgentEvent) {
         AgentEvent::TextDelta(delta) => {
             app.streaming_text.push_str(&delta);
         }
-        AgentEvent::ToolCallBegin { name, arguments, .. } => {
-            app.chat_history.push(ChatEntry::ToolCall { name, arguments });
+        AgentEvent::ToolCallBegin {
+            name, arguments, ..
+        } => {
+            app.chat_history
+                .push(ChatEntry::ToolCall { name, arguments });
         }
         AgentEvent::ToolCallEnd { id, output } => {
             // Ignore internal error sentinels
@@ -240,7 +246,10 @@ fn handle_agent_event(app: &mut App, event: AgentEvent) {
                     }
                 })
                 .unwrap_or_default();
-            app.chat_history.push(ChatEntry::ToolResult { name, output: output_str });
+            app.chat_history.push(ChatEntry::ToolResult {
+                name,
+                output: output_str,
+            });
         }
         AgentEvent::ToolCallDenied { id, name, reason } => {
             if id == "__error__" {

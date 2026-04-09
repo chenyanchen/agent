@@ -15,7 +15,10 @@ pub enum Message {
         tool_calls: Vec<ToolCall>,
     },
     #[serde(rename = "tool")]
-    Tool { tool_call_id: String, content: String },
+    Tool {
+        tool_call_id: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,7 +34,9 @@ mod tests {
 
     #[test]
     fn serialize_system_message() {
-        let msg = Message::System { content: "You are helpful.".to_string() };
+        let msg = Message::System {
+            content: "You are helpful.".to_string(),
+        };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["role"], "system");
@@ -40,7 +45,9 @@ mod tests {
 
     #[test]
     fn serialize_user_message() {
-        let msg = Message::User { content: "Hello!".to_string() };
+        let msg = Message::User {
+            content: "Hello!".to_string(),
+        };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["role"], "user");

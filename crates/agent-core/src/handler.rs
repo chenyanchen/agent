@@ -4,10 +4,23 @@ use crate::tool::ToolOutput;
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     TextDelta(String),
-    ToolCallBegin { id: String, name: String, arguments: String },
-    ToolCallEnd { id: String, output: ToolOutput },
-    ToolCallDenied { id: String, name: String, reason: String },
-    TurnComplete { usage: Usage },
+    ToolCallBegin {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolCallEnd {
+        id: String,
+        output: ToolOutput,
+    },
+    ToolCallDenied {
+        id: String,
+        name: String,
+        reason: String,
+    },
+    TurnComplete {
+        usage: Usage,
+    },
 }
 
 #[async_trait::async_trait]

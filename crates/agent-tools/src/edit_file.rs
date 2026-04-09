@@ -50,9 +50,7 @@ impl Tool for EditFileTool {
 
         let count = content.matches(old_string).count();
         if count == 0 {
-            return Err(Error::Tool(format!(
-                "old_string not found in '{path}'"
-            )));
+            return Err(Error::Tool(format!("old_string not found in '{path}'")));
         }
         if count > 1 {
             return Err(Error::Tool(format!(

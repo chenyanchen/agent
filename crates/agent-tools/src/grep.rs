@@ -40,8 +40,8 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Tool("missing 'path' field".to_string()))?;
 
-        let re = Regex::new(pattern)
-            .map_err(|e| Error::Tool(format!("invalid regex pattern: {e}")))?;
+        let re =
+            Regex::new(pattern).map_err(|e| Error::Tool(format!("invalid regex pattern: {e}")))?;
 
         let mut matches: Vec<String> = Vec::new();
 
@@ -59,12 +59,7 @@ impl Tool for GrepTool {
 
             for (line_num, line) in content.lines().enumerate() {
                 if re.is_match(line) {
-                    matches.push(format!(
-                        "{}:{}:{}",
-                        file_path.display(),
-                        line_num + 1,
-                        line
-                    ));
+                    matches.push(format!("{}:{}:{}", file_path.display(), line_num + 1, line));
                 }
             }
         }

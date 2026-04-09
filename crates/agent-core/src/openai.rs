@@ -97,12 +97,13 @@ fn convert_message(msg: Message) -> ChatCompletionRequestMessage {
                 function_call: None,
             })
         }
-        Message::Tool { tool_call_id, content } => {
-            ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
-                content: ChatCompletionRequestToolMessageContent::Text(content),
-                tool_call_id,
-            })
-        }
+        Message::Tool {
+            tool_call_id,
+            content,
+        } => ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+            content: ChatCompletionRequestToolMessageContent::Text(content),
+            tool_call_id,
+        }),
     }
 }
 
@@ -154,7 +155,9 @@ impl Model for OpenAIModel {
             temperature: request.temperature,
             max_completion_tokens: request.max_tokens,
             tools,
-            stream_options: Some(ChatCompletionStreamOptions { include_usage: true }),
+            stream_options: Some(ChatCompletionStreamOptions {
+                include_usage: true,
+            }),
             // All other fields — use their defaults (None / false).
             store: None,
             reasoning_effort: None,
@@ -221,9 +224,10 @@ impl Model for OpenAIModel {
 
                             // Text delta
                             if let Some(content) = delta.content
-                                && !content.is_empty() {
-                                    let _ = tx.send(Event::TextDelta(content));
-                                }
+                                && !content.is_empty()
+                            {
+                                let _ = tx.send(Event::TextDelta(content));
+                            }
 
                             // Tool call chunks
                             if let Some(tc_chunks) = delta.tool_calls {
@@ -248,13 +252,13 @@ impl Model for OpenAIModel {
                                         if let Some(args_delta) = func.arguments
                                             && let Some((id, _, accumulated)) =
                                                 pending.get_mut(&index)
-                                            {
-                                                accumulated.push_str(&args_delta);
-                                                let _ = tx.send(Event::ToolCallDelta {
-                                                    id: id.clone(),
-                                                    arguments_delta: args_delta,
-                                                });
-                                            }
+                                        {
+                                            accumulated.push_str(&args_delta);
+                                            let _ = tx.send(Event::ToolCallDelta {
+                                                id: id.clone(),
+                                                arguments_delta: args_delta,
+                                            });
+                                        }
                                     }
                                 }
                             }

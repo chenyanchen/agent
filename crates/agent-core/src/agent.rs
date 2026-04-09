@@ -38,7 +38,9 @@ where
 
     pub async fn run(&mut self, user_input: &str, handler: &dyn Handler) -> Result<(), Error> {
         // Add user message to history
-        self.messages.push(Message::User { content: user_input.to_string() });
+        self.messages.push(Message::User {
+            content: user_input.to_string(),
+        });
 
         // Build tool definitions once — tools don't change during a run.
         let tool_definitions: Vec<ToolDefinition> = self
@@ -85,10 +87,12 @@ where
                         if !pending_tool_calls.contains_key(id) {
                             tool_call_order.push(id.clone());
                         }
-                        pending_tool_calls
-                            .insert(id.clone(), (name.clone(), String::new()));
+                        pending_tool_calls.insert(id.clone(), (name.clone(), String::new()));
                     }
-                    Event::ToolCallDelta { ref id, ref arguments_delta } => {
+                    Event::ToolCallDelta {
+                        ref id,
+                        ref arguments_delta,
+                    } => {
                         if let Some((_, args)) = pending_tool_calls.get_mut(id) {
                             args.push_str(arguments_delta);
                         }
@@ -106,13 +110,13 @@ where
             let tool_calls: Vec<crate::message::ToolCall> = tool_call_order
                 .iter()
                 .filter_map(|id| {
-                    pending_tool_calls.get(id).map(|(name, arguments)| {
-                        crate::message::ToolCall {
+                    pending_tool_calls
+                        .get(id)
+                        .map(|(name, arguments)| crate::message::ToolCall {
                             id: id.clone(),
                             name: name.clone(),
                             arguments: arguments.clone(),
-                        }
-                    })
+                        })
                 })
                 .collect();
 
@@ -375,10 +379,7 @@ mod tests {
         }
 
         async fn call(&self, input: serde_json::Value) -> Result<ToolOutput, Error> {
-            let text = input
-                .get("input")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let text = input.get("input").and_then(|v| v.as_str()).unwrap_or("");
             Ok(ToolOutput::Text(format!("output: {text}")))
         }
     }
@@ -442,11 +443,15 @@ mod tests {
 
         // Should have TextDelta and TurnComplete
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::TextDelta(s) if s == "Hello, world!")),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(s) if s == "Hello, world!")),
             "expected TextDelta with 'Hello, world!'"
         );
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::TurnComplete { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnComplete { .. })),
             "expected TurnComplete"
         );
     }
@@ -465,8 +470,12 @@ mod tests {
                     id: "call_1".to_string(),
                     arguments_delta: r#"{"input":"hello"}"#.to_string(),
                 },
-                Event::ToolCallEnd { id: "call_1".to_string() },
-                Event::Done { usage: Usage::default() },
+                Event::ToolCallEnd {
+                    id: "call_1".to_string(),
+                },
+                Event::Done {
+                    usage: Usage::default(),
+                },
             ],
             // Turn 2: model returns text after seeing tool result
             vec![
@@ -516,13 +525,17 @@ mod tests {
 
         // Should have TextDelta from second model turn
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::TextDelta(s) if s == "Done!")),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(s) if s == "Done!")),
             "expected TextDelta 'Done!'"
         );
 
         // Should end with TurnComplete
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::TurnComplete { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnComplete { .. })),
             "expected TurnComplete"
         );
     }

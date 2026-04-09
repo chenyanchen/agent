@@ -53,7 +53,9 @@ mod tests {
     async fn save_and_load() {
         let storage = MemoryStorage::new();
         let messages = vec![
-            Message::User { content: "Hello".to_string() },
+            Message::User {
+                content: "Hello".to_string(),
+            },
             Message::Assistant {
                 text: Some("Hi!".to_string()),
                 tool_calls: vec![],
@@ -80,10 +82,16 @@ mod tests {
     #[tokio::test]
     async fn overwrite_existing() {
         let storage = MemoryStorage::new();
-        let first = vec![Message::User { content: "first".to_string() }];
+        let first = vec![Message::User {
+            content: "first".to_string(),
+        }];
         let second = vec![
-            Message::User { content: "second_a".to_string() },
-            Message::User { content: "second_b".to_string() },
+            Message::User {
+                content: "second_a".to_string(),
+            },
+            Message::User {
+                content: "second_b".to_string(),
+            },
         ];
 
         storage.save("conv-1", &first).await.unwrap();

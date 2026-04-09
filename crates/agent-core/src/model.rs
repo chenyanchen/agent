@@ -64,7 +64,9 @@ mod tests {
         let model = EchoModel;
         let request = Request {
             system: None,
-            messages: vec![Message::User { content: "ping".to_string() }],
+            messages: vec![Message::User {
+                content: "ping".to_string(),
+            }],
             tools: vec![],
             temperature: None,
             max_tokens: None,

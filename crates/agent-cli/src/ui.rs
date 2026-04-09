@@ -47,7 +47,12 @@ fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         match entry {
             ChatEntry::User(text) => {
                 lines.push(Line::from(vec![
-                    Span::styled("You: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "You: ",
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(text.clone()),
                 ]));
             }
@@ -55,7 +60,9 @@ fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 lines.push(Line::from(vec![
                     Span::styled(
                         "Assistant: ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(text.clone()),
                 ]));
@@ -64,7 +71,9 @@ fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 lines.push(Line::from(vec![
                     Span::styled(
                         "  [tool] ",
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(name.clone(), Style::default().fg(Color::Yellow)),
                     Span::raw(format!("({arguments})")),
@@ -74,7 +83,9 @@ fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 lines.push(Line::from(vec![
                     Span::styled(
                         "  [result] ",
-                        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(name.clone(), Style::default().fg(Color::Magenta)),
                     Span::raw(format!(": {output}")),
@@ -97,7 +108,9 @@ fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         lines.push(Line::from(vec![
             Span::styled(
                 "Assistant: ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(app.streaming_text.clone()),
             // Blinking cursor indicator while streaming
@@ -134,7 +147,9 @@ fn draw_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let status_line = Line::from(vec![
         Span::styled(
             format!(" model: {} ", app.model_id),
-            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" | ", Style::default().fg(Color::DarkGray)),
         right_side,
@@ -142,8 +157,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Span::styled(" Ctrl+C to quit ", Style::default().fg(Color::DarkGray)),
     ]);
 
-    let status_bar = Paragraph::new(status_line)
-        .style(Style::default().bg(Color::Reset));
+    let status_bar = Paragraph::new(status_line).style(Style::default().bg(Color::Reset));
 
     frame.render_widget(status_bar, area);
 }
@@ -160,16 +174,23 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let cursor_char: String = chars.get(cursor_pos).copied().unwrap_or(' ').to_string();
     let after: String = chars.get(cursor_pos + 1..).unwrap_or(&[]).iter().collect();
 
-    let title = if app.is_running { " Input (waiting...) " } else { " Input " };
+    let title = if app.is_running {
+        " Input (waiting...) "
+    } else {
+        " Input "
+    };
 
     let input_line = Line::from(vec![
         Span::raw(before),
-        Span::styled(cursor_char, Style::default().bg(Color::White).fg(Color::Black)),
+        Span::styled(
+            cursor_char,
+            Style::default().bg(Color::White).fg(Color::Black),
+        ),
         Span::raw(after),
     ]);
 
-    let input_widget = Paragraph::new(input_line)
-        .block(Block::default().title(title).borders(Borders::ALL));
+    let input_widget =
+        Paragraph::new(input_line).block(Block::default().title(title).borders(Borders::ALL));
 
     frame.render_widget(input_widget, area);
 }

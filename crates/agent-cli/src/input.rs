@@ -114,8 +114,8 @@ mod tests {
         let mut buf = InputBuffer::new();
         buf.insert('a');
         buf.insert('c');
-        buf.move_left();          // cursor at 1
-        buf.insert('b');          // inserts 'b' between 'a' and 'c'
+        buf.move_left(); // cursor at 1
+        buf.insert('b'); // inserts 'b' between 'a' and 'c'
         assert_eq!(buf.content(), "abc");
         assert_eq!(buf.cursor(), 2);
     }
