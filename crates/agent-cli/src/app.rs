@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_openai::config::OpenAIConfig;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -119,9 +119,13 @@ impl App {
         });
 
         // ── Terminal setup ────────────────────────────────────────────────────
+        //
+        // We intentionally do NOT enable mouse capture: we never consume mouse
+        // events, and capturing them would prevent the terminal emulator from
+        // handling native click-and-drag text selection.
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(stdout, EnterAlternateScreen)?;
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;
 
@@ -131,11 +135,7 @@ impl App {
 
         // ── Terminal cleanup ──────────────────────────────────────────────────
         disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
         terminal.show_cursor()?;
 
         result
