@@ -5,3 +5,13 @@ members = [
     "crates/agent-tools",
     "crates/agent-cli",
 ]
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
