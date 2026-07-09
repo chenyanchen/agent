@@ -3,6 +3,10 @@ name = "agent-cli"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "agent"
+path = "src/main.rs"
+
 [dependencies]
 agent-core = { path = "../agent-core" }
 agent-tools = { path = "../agent-tools" }

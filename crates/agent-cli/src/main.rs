@@ -14,7 +14,7 @@ struct Cli {
     /// Override the OpenAI-compatible API base URL
     #[arg(long)]
     api_base: Option<String>,
-    /// Run in auto mode (skip all confirmations)
+    /// Run in auto mode (currently the only supported mode)
     #[arg(long)]
     auto: bool,
 }

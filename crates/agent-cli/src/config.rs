@@ -60,7 +60,7 @@ pub struct GuardConfig {
 }
 
 fn default_guard_mode() -> GuardMode {
-    GuardMode::Confirm
+    GuardMode::Auto
 }
 
 impl Default for GuardConfig {
@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(cfg.model.model_id, "gpt-4o");
         assert!(cfg.model.api_key.is_none());
         assert!(cfg.model.api_base.is_none());
-        assert_eq!(cfg.guard.mode, GuardMode::Confirm);
+        assert_eq!(cfg.guard.mode, GuardMode::Auto);
         assert!(cfg.system_prompt.is_none());
     }
 
@@ -129,13 +129,13 @@ model_id = "gpt-3.5-turbo"
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.model.model_id, "gpt-3.5-turbo");
         assert!(cfg.model.api_key.is_none());
-        assert_eq!(cfg.guard.mode, GuardMode::Confirm);
+        assert_eq!(cfg.guard.mode, GuardMode::Auto);
     }
 
     #[test]
     fn parse_empty_toml_is_all_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.model.model_id, "gpt-4o");
-        assert_eq!(cfg.guard.mode, GuardMode::Confirm);
+        assert_eq!(cfg.guard.mode, GuardMode::Auto);
     }
 }

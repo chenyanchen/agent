@@ -19,8 +19,8 @@ where
 {
     model: M,
     guard: G,
-    #[allow(dead_code)]
     storage: S,
+    conversation_id: String,
     tools: BTreeMap<String, Box<dyn Tool>>,
     system_prompt: String,
     messages: Vec<Message>,
@@ -37,6 +37,10 @@ where
     }
 
     pub async fn run(&mut self, user_input: &str, handler: &dyn Handler) -> Result<(), Error> {
+        if self.messages.is_empty() {
+            self.messages = self.storage.load(&self.conversation_id).await?;
+        }
+
         // Add user message to history
         self.messages.push(Message::User {
             content: user_input.to_string(),
@@ -133,6 +137,9 @@ where
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                self.storage
+                    .save(&self.conversation_id, &self.messages)
+                    .await?;
                 handler.on_event(AgentEvent::TurnComplete { usage }).await;
                 return Ok(());
             }
@@ -254,6 +261,7 @@ where
     model: Option<M>,
     guard: Option<G>,
     storage: Option<S>,
+    conversation_id: String,
     tools: BTreeMap<String, Box<dyn Tool>>,
     system_prompt: String,
 }
@@ -269,6 +277,7 @@ where
             model: None,
             guard: None,
             storage: None,
+            conversation_id: "default".to_string(),
             tools: BTreeMap::new(),
             system_prompt: String::new(),
         }
@@ -289,6 +298,11 @@ where
         self
     }
 
+    pub fn conversation_id(mut self, id: impl Into<String>) -> Self {
+        self.conversation_id = id.into();
+        self
+    }
+
     pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
         self.tools.insert(tool.name().to_string(), Box::new(tool));
         self
@@ -304,6 +318,7 @@ where
             model: self.model.expect("model is required"),
             guard: self.guard.expect("guard is required"),
             storage: self.storage.expect("storage is required"),
+            conversation_id: self.conversation_id,
             tools: self.tools,
             system_prompt: self.system_prompt,
             messages: Vec::new(),
@@ -328,19 +343,29 @@ mod tests {
     struct MockModel {
         // Each call to stream() returns the next Vec<Event> in sequence
         responses: Arc<Mutex<Vec<Vec<Event>>>>,
+        requests: Arc<Mutex<Vec<Request>>>,
     }
 
     impl MockModel {
         fn new(responses: Vec<Vec<Event>>) -> Self {
             Self {
                 responses: Arc::new(Mutex::new(responses)),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn with_requests(responses: Vec<Vec<Event>>, requests: Arc<Mutex<Vec<Request>>>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses)),
+                requests,
             }
         }
     }
 
     #[async_trait::async_trait]
     impl Model for MockModel {
-        async fn stream(&self, _request: Request) -> Result<crate::event::StreamResponse, Error> {
+        async fn stream(&self, request: Request) -> Result<crate::event::StreamResponse, Error> {
+            self.requests.lock().unwrap().push(request);
             let mut lock = self.responses.lock().unwrap();
             if lock.is_empty() {
                 return Err(Error::Model("no more responses".to_string()));
@@ -538,5 +563,46 @@ mod tests {
                 .any(|e| matches!(e, AgentEvent::TurnComplete { .. })),
             "expected TurnComplete"
         );
+    }
+
+    #[tokio::test]
+    async fn test_agent_loads_and_saves_conversation() {
+        let storage = MemoryStorage::new();
+        storage
+            .save(
+                "default",
+                &[Message::Assistant {
+                    text: Some("old answer".to_string()),
+                    tool_calls: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let model = MockModel::with_requests(
+            vec![vec![
+                Event::TextDelta("new answer".to_string()),
+                Event::Done {
+                    usage: Usage::default(),
+                },
+            ]],
+            requests.clone(),
+        );
+        let handler = CollectingHandler::new();
+
+        let mut agent = Agent::builder()
+            .model(model)
+            .guard(AutoGuard)
+            .storage(storage.clone())
+            .build();
+
+        agent.run("new question", &handler).await.unwrap();
+
+        let seen_len = requests.lock().unwrap()[0].messages.len();
+        assert_eq!(seen_len, 2);
+
+        let saved = storage.load("default").await.unwrap();
+        assert_eq!(saved.len(), 3);
     }
 }

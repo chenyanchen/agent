@@ -12,6 +12,7 @@ pub trait Storage: Send + Sync {
     async fn load(&self, id: &str) -> Result<Vec<Message>, Error>;
 }
 
+#[derive(Clone)]
 pub struct MemoryStorage {
     data: Arc<RwLock<HashMap<String, Vec<Message>>>>,
 }

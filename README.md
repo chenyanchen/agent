@@ -43,7 +43,7 @@ api_key  = "sk-..."
 # api_base = "https://api.deepseek.com/v1"
 
 [guard]
-mode = "confirm"   # or "auto"
+mode = "auto"   # currently the only supported CLI mode
 
 # Optional custom system prompt
 # system_prompt = "You are a helpful assistant."
@@ -53,7 +53,7 @@ CLI flags override the config file:
 
 ```sh
 agent --model deepseek-chat --api-base https://api.deepseek.com/v1
-agent --auto     # skip all tool-call confirmations
+agent --auto
 ```
 
 If `api_key` is not set in the config, the `OPENAI_API_KEY` environment
