@@ -17,6 +17,9 @@ struct Cli {
     /// Run in auto mode (currently the only supported mode)
     #[arg(long)]
     auto: bool,
+    /// Conversation to create or resume
+    #[arg(long, default_value = "default")]
+    session: String,
 }
 
 fn main() -> std::io::Result<()> {
@@ -34,5 +37,5 @@ fn main() -> std::io::Result<()> {
         cfg.guard.mode = config::GuardMode::Auto;
     }
 
-    app::App::run(cfg)
+    app::App::run(cfg, cli.session)
 }
