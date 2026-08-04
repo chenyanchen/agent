@@ -29,7 +29,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Min(1),    // chat area — fills remaining space
             Constraint::Length(1), // status bar — exactly 1 line
-            Constraint::Length(3), // input area — 3 lines (1 content + 2 border)
+            Constraint::Length(if app.confirmation.is_some() { 5 } else { 3 }),
         ])
         .split(frame.area());
 
@@ -135,7 +135,12 @@ fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 fn draw_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let right_side = if app.is_running {
+    let right_side = if app.confirmation.is_some() {
+        Span::styled(
+            " awaiting confirmation... ",
+            Style::default().fg(Color::Yellow),
+        )
+    } else if app.is_running {
         Span::styled(" thinking... ", Style::default().fg(Color::Yellow))
     } else {
         Span::styled(
@@ -165,6 +170,32 @@ fn draw_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 // ── Input area ────────────────────────────────────────────────────────────────
 
 fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    if let Some(confirmation) = &app.confirmation {
+        let choice = |selected, text| {
+            Line::from(vec![
+                Span::styled(
+                    if selected { "> " } else { "  " },
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(text),
+            ])
+        };
+        let lines = vec![
+            choice(confirmation.allow_selected, "Allow this tool call"),
+            choice(!confirmation.allow_selected, "Deny this tool call"),
+        ];
+        let widget = Paragraph::new(lines).block(
+            Block::default()
+                .title(format!(
+                    " {}({}) ",
+                    confirmation.name, confirmation.arguments
+                ))
+                .borders(Borders::ALL),
+        );
+        frame.render_widget(widget, area);
+        return;
+    }
+
     let content = app.input.content();
     let cursor_pos = app.input.cursor();
 

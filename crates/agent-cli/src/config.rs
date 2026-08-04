@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use agent_core::{ConfirmGuard, Decision, Guard, RiskLevel};
+
 // ── Top-level Config ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -78,6 +80,21 @@ impl Default for GuardConfig {
 pub enum GuardMode {
     Auto,
     Confirm,
+}
+
+#[async_trait::async_trait]
+impl Guard for GuardMode {
+    async fn check(
+        &self,
+        tool_name: &str,
+        risk_level: RiskLevel,
+        input: &serde_json::Value,
+    ) -> Decision {
+        match self {
+            Self::Auto => Decision::Allow,
+            Self::Confirm => ConfirmGuard.check(tool_name, risk_level, input).await,
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

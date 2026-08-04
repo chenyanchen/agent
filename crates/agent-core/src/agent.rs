@@ -165,8 +165,38 @@ where
                     }
                 };
 
+                let Some(tool) = self.tools.get(&tc.name) else {
+                    let output = ToolOutput::Error(format!("unknown tool: {}", tc.name));
+                    handler
+                        .on_event(AgentEvent::ToolCallBegin {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                        })
+                        .await;
+                    handler
+                        .on_event(AgentEvent::ToolCallEnd {
+                            id: tc.id.clone(),
+                            output: output.clone(),
+                        })
+                        .await;
+                    self.messages.push(Message::Tool {
+                        tool_call_id: tc.id.clone(),
+                        content: output.to_string(),
+                    });
+                    continue;
+                };
+
+                handler
+                    .on_event(AgentEvent::ToolCallBegin {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    })
+                    .await;
+
                 // Check guard
-                let decision = self.guard.check(&tc.name, &input).await;
+                let decision = self.guard.check(&tc.name, tool.risk_level(), &input).await;
                 match decision {
                     Decision::Deny(reason) => {
                         handler
@@ -205,22 +235,10 @@ where
                     Decision::Allow => {}
                 }
 
-                // Emit ToolCallBegin
-                handler
-                    .on_event(AgentEvent::ToolCallBegin {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
-                    })
-                    .await;
-
                 // Execute tool
-                let output = match self.tools.get(&tc.name) {
-                    Some(tool) => match tool.call(input).await {
-                        Ok(out) => out,
-                        Err(e) => ToolOutput::Error(e.to_string()),
-                    },
-                    None => ToolOutput::Error(format!("unknown tool: {}", tc.name)),
+                let output = match tool.call(input).await {
+                    Ok(out) => out,
+                    Err(e) => ToolOutput::Error(e.to_string()),
                 };
 
                 // Emit ToolCallEnd
@@ -315,6 +333,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -384,16 +403,51 @@ mod tests {
         }
     }
 
+    struct HighRiskTool(Arc<AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl Tool for HighRiskTool {
+        fn name(&self) -> &str {
+            "high_risk_tool"
+        }
+
+        fn description(&self) -> &str {
+            "A high-risk tool for testing."
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn risk_level(&self) -> RiskLevel {
+            RiskLevel::High
+        }
+
+        async fn call(&self, _input: serde_json::Value) -> Result<ToolOutput, Error> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(ToolOutput::Text("called".to_string()))
+        }
+    }
+
     // ── CollectingHandler ────────────────────────────────────────────────────
 
     struct CollectingHandler {
         events: Arc<Mutex<Vec<AgentEvent>>>,
+        confirmed: bool,
     }
 
     impl CollectingHandler {
         fn new() -> Self {
             Self {
                 events: Arc::new(Mutex::new(Vec::new())),
+                confirmed: true,
+            }
+        }
+
+        fn denying() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+                confirmed: false,
             }
         }
 
@@ -409,7 +463,7 @@ mod tests {
         }
 
         async fn confirm(&self, _tool_name: &str, _input: &serde_json::Value) -> bool {
-            true
+            self.confirmed
         }
     }
 
@@ -538,5 +592,45 @@ mod tests {
                 .any(|e| matches!(e, AgentEvent::TurnComplete { .. })),
             "expected TurnComplete"
         );
+    }
+    #[tokio::test]
+    async fn denied_high_risk_tool_is_not_executed() {
+        let model = MockModel::new(vec![
+            vec![
+                Event::ToolCallBegin {
+                    id: "call_1".to_string(),
+                    name: "high_risk_tool".to_string(),
+                },
+                Event::ToolCallDelta {
+                    id: "call_1".to_string(),
+                    arguments_delta: "{}".to_string(),
+                },
+                Event::Done {
+                    usage: Usage::default(),
+                },
+            ],
+            vec![
+                Event::TextDelta("Denied safely.".to_string()),
+                Event::Done {
+                    usage: Usage::default(),
+                },
+            ],
+        ]);
+        let called = Arc::new(AtomicBool::new(false));
+        let handler = CollectingHandler::denying();
+        let mut agent = Agent::builder()
+            .model(model)
+            .guard(crate::guard::ConfirmGuard)
+            .storage(MemoryStorage::new())
+            .tool(HighRiskTool(called.clone()))
+            .build();
+
+        agent.run("Use the tool", &handler).await.unwrap();
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(handler.collected().iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallDenied { name, .. } if name == "high_risk_tool"
+        )));
     }
 }

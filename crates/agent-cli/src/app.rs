@@ -3,15 +3,15 @@ use std::time::Duration;
 
 use async_openai::config::OpenAIConfig;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-use agent_core::{Agent, AgentEvent, AutoGuard, Handler, MemoryStorage, OpenAIModel};
+use agent_core::{Agent, AgentEvent, Handler, MemoryStorage, OpenAIModel};
 use agent_tools::{EditFileTool, GlobTool, GrepTool, ReadFileTool, ShellTool, WriteFileTool};
 
 use crate::config::Config;
@@ -30,6 +30,35 @@ pub struct App {
     pub model_id: String,
     pub total_tokens: u32,
     pub should_quit: bool,
+    pub confirmation: Option<PendingConfirmation>,
+}
+
+struct ConfirmationRequest {
+    name: String,
+    input: serde_json::Value,
+    response: oneshot::Sender<bool>,
+}
+
+pub struct PendingConfirmation {
+    pub name: String,
+    pub arguments: String,
+    pub allow_selected: bool,
+    response: oneshot::Sender<bool>,
+}
+
+impl PendingConfirmation {
+    fn new(name: String, input: serde_json::Value, response: oneshot::Sender<bool>) -> Self {
+        Self {
+            name,
+            arguments: input.to_string(),
+            allow_selected: false,
+            response,
+        }
+    }
+
+    fn respond(self, allowed: bool) {
+        let _ = self.response.send(allowed);
+    }
 }
 
 impl App {
@@ -43,6 +72,7 @@ impl App {
             model_id: model_id.into(),
             total_tokens: 0,
             should_quit: false,
+            confirmation: None,
         }
     }
 
@@ -59,6 +89,8 @@ impl App {
         // ── Channels ──────────────────────────────────────────────────────────
         let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (confirmation_tx, mut confirmation_rx) =
+            mpsc::unbounded_channel::<ConfirmationRequest>();
 
         // ── Spawn agent task ──────────────────────────────────────────────────
         let system_prompt = config
@@ -84,13 +116,9 @@ impl App {
 
             let model = OpenAIModel::with_config(model_id, oai_cfg);
 
-            // Both Auto and Confirm use AutoGuard in TUI mode; interactive
-            // confirmation is not yet implemented (TuiHandler always confirms).
-            let _ = guard_mode;
-            let guard = AutoGuard;
             let mut agent = Agent::builder()
                 .model(model)
-                .guard(guard)
+                .guard(guard_mode)
                 .storage(MemoryStorage::new())
                 .system_prompt(&system_prompt)
                 .tool(ShellTool)
@@ -103,6 +131,7 @@ impl App {
 
             let handler = TuiHandler {
                 tx: event_tx_clone.clone(),
+                confirmation_tx,
             };
             while let Some(user_input) = input_rx.recv().await {
                 if let Err(e) = agent.run(&user_input, &handler).await {
@@ -133,7 +162,14 @@ impl App {
 
         let mut app = App::new(&config.model.model_id);
 
-        let result = run_loop(&mut terminal, &mut app, &input_tx, &mut event_rx).await;
+        let result = run_loop(
+            &mut terminal,
+            &mut app,
+            &input_tx,
+            &mut event_rx,
+            &mut confirmation_rx,
+        )
+        .await;
 
         // ── Terminal cleanup ──────────────────────────────────────────────────
         disable_raw_mode()?;
@@ -151,6 +187,7 @@ async fn run_loop(
     app: &mut App,
     input_tx: &mpsc::UnboundedSender<String>,
     event_rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
+    confirmation_rx: &mut mpsc::UnboundedReceiver<ConfirmationRequest>,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
@@ -159,12 +196,25 @@ async fn run_loop(
         while let Ok(agent_event) = event_rx.try_recv() {
             handle_agent_event(app, agent_event);
         }
+        while let Ok(request) = confirmation_rx.try_recv() {
+            app.confirmation = Some(PendingConfirmation::new(
+                request.name,
+                request.input,
+                request.response,
+            ));
+        }
 
         // Poll for terminal input with a short timeout so we stay responsive
         // to both keyboard events and agent streaming events.
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
         {
+            if handle_confirmation_key(app, key) {
+                if app.should_quit {
+                    break;
+                }
+                continue;
+            }
             match (key.code, key.modifiers) {
                 // Quit on Ctrl+C
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -209,6 +259,38 @@ async fn run_loop(
         }
     }
     Ok(())
+}
+
+fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
+    let Some(confirmation) = app.confirmation.as_mut() else {
+        return false;
+    };
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+            app.confirmation.take().unwrap().respond(false);
+            app.should_quit = true;
+        }
+        (KeyCode::Char('y'), _) => app.confirmation.take().unwrap().respond(true),
+        (KeyCode::Char('n'), _) | (KeyCode::Esc, _) => {
+            app.confirmation.take().unwrap().respond(false);
+        }
+        (KeyCode::Enter, _) => {
+            let allowed = confirmation.allow_selected;
+            app.confirmation.take().unwrap().respond(allowed);
+        }
+        (KeyCode::Up, _) | (KeyCode::Down, _) => {
+            confirmation.allow_selected = !confirmation.allow_selected;
+        }
+        (KeyCode::PageUp, _) => {
+            app.scroll_offset = app.scroll_offset.saturating_add(3);
+        }
+        (KeyCode::PageDown, _) => {
+            app.scroll_offset = app.scroll_offset.saturating_sub(3);
+        }
+        _ => {}
+    }
+    true
 }
 
 // ── Agent event handler ───────────────────────────────────────────────────────
@@ -277,6 +359,7 @@ fn handle_agent_event(app: &mut App, event: AgentEvent) {
 
 pub struct TuiHandler {
     pub tx: mpsc::UnboundedSender<AgentEvent>,
+    confirmation_tx: mpsc::UnboundedSender<ConfirmationRequest>,
 }
 
 #[async_trait::async_trait]
@@ -285,9 +368,57 @@ impl Handler for TuiHandler {
         let _ = self.tx.send(event);
     }
 
-    /// In TUI mode we auto-confirm all tool calls.  A real implementation
-    /// would pause the loop and render a confirmation prompt.
-    async fn confirm(&self, _tool_name: &str, _input: &serde_json::Value) -> bool {
-        true
+    async fn confirm(&self, tool_name: &str, input: &serde_json::Value) -> bool {
+        let (response, receiver) = oneshot::channel();
+        if self
+            .confirmation_tx
+            .send(ConfirmationRequest {
+                name: tool_name.to_string(),
+                input: input.clone(),
+                response,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        receiver.await.unwrap_or(false)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmation_defaults_to_deny_and_can_be_allowed() {
+        let mut app = App::new("test-model");
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        app.confirmation = Some(PendingConfirmation::new(
+            "shell".to_string(),
+            serde_json::json!({"command": "cargo test"}),
+            response_tx,
+        ));
+
+        handle_confirmation_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(response_rx.try_recv(), Ok(false));
+
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        app.confirmation = Some(PendingConfirmation::new(
+            "shell".to_string(),
+            serde_json::json!({"command": "cargo test"}),
+            response_tx,
+        ));
+        assert!(handle_confirmation_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        ));
+        assert!(app.confirmation.as_ref().unwrap().allow_selected);
+        assert!(handle_confirmation_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ));
+        assert_eq!(response_rx.try_recv(), Ok(true));
     }
 }
