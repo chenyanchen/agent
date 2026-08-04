@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_openai::config::OpenAIConfig;
@@ -74,10 +75,7 @@ impl App {
         let api_base = config.model.api_base.clone();
         let guard_mode = config.guard.mode.clone();
         let event_tx_clone = event_tx.clone();
-        let storage_dir = dirs::home_dir()
-            .ok_or_else(|| io::Error::other("home directory not found"))?
-            .join(".agent")
-            .join("sessions");
+        let storage_dir = sessions_dir()?;
         let storage = FileStorage::new(storage_dir);
         let history = storage
             .load(&session)
@@ -156,6 +154,12 @@ impl App {
 
         result
     }
+}
+
+pub(crate) fn sessions_dir() -> io::Result<PathBuf> {
+    dirs::home_dir()
+        .map(|home| home.join(".agent").join("sessions"))
+        .ok_or_else(|| io::Error::other("home directory not found"))
 }
 
 fn restore_chat_history(messages: Vec<Message>) -> Vec<ChatEntry> {

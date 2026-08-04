@@ -76,7 +76,7 @@ OpenAI and DeepSeek. Typical `api_base` values:
 Run `agent` to start the TUI. Type a message and press `Enter`.
 The default conversation is saved under `~/.agent/sessions/default.json` and
 resumed on the next run. Use `agent --session <name>` to create or resume a
-different conversation.
+different conversation. Run `agent sessions` to list saved session names.
 
 ### Keybindings
 
