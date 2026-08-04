@@ -118,16 +118,14 @@ fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ]));
     }
 
-    // Compute scroll: show bottom of content by default.
-    let total_lines = lines.len() as u16;
-    let visible_height = area.height.saturating_sub(2); // subtract border
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll = max_scroll.saturating_sub(app.scroll_offset as u16);
-
     let paragraph = Paragraph::new(lines)
         .block(Block::default().title(" Chat ").borders(Borders::ALL))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .wrap(Wrap { trim: false });
+    // line_count includes wrapping and the border, so long tool arguments stay scrollable.
+    let max_scroll =
+        (paragraph.line_count(area.width.saturating_sub(2)) as u16).saturating_sub(area.height);
+    let scroll = max_scroll.saturating_sub(app.scroll_offset as u16);
+    let paragraph = paragraph.scroll((scroll, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -224,4 +222,18 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Paragraph::new(input_line).block(Block::default().title(title).borders(Borders::ALL));
 
     frame.render_widget(input_widget, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrapped_chat_lines_contribute_to_scroll_height() {
+        let paragraph = Paragraph::new("12345678901234567890")
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+
+        assert_eq!(paragraph.line_count(6), 6);
+    }
 }

@@ -197,42 +197,27 @@ where
 
                 // Check guard
                 let decision = self.guard.check(&tc.name, tool.risk_level(), &input).await;
-                match decision {
-                    Decision::Deny(reason) => {
-                        handler
-                            .on_event(AgentEvent::ToolCallDenied {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                reason: reason.clone(),
-                            })
-                            .await;
-                        let output = ToolOutput::Error(format!("denied: {reason}"));
-                        self.messages.push(Message::Tool {
-                            tool_call_id: tc.id.clone(),
-                            content: output.to_string(),
-                        });
-                        continue;
+                let denial_reason = match decision {
+                    Decision::Deny(reason) => Some(reason),
+                    Decision::NeedConfirm if !handler.confirm(&tc.name, &input).await => {
+                        Some("user denied confirmation".to_string())
                     }
-                    Decision::NeedConfirm => {
-                        let confirmed = handler.confirm(&tc.name, &input).await;
-                        if !confirmed {
-                            let reason = "user denied confirmation".to_string();
-                            handler
-                                .on_event(AgentEvent::ToolCallDenied {
-                                    id: tc.id.clone(),
-                                    name: tc.name.clone(),
-                                    reason: reason.clone(),
-                                })
-                                .await;
-                            let output = ToolOutput::Error(format!("denied: {reason}"));
-                            self.messages.push(Message::Tool {
-                                tool_call_id: tc.id.clone(),
-                                content: output.to_string(),
-                            });
-                            continue;
-                        }
-                    }
-                    Decision::Allow => {}
+                    Decision::NeedConfirm | Decision::Allow => None,
+                };
+                if let Some(reason) = denial_reason {
+                    handler
+                        .on_event(AgentEvent::ToolCallDenied {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            reason: reason.clone(),
+                        })
+                        .await;
+                    let output = ToolOutput::Error(format!("denied: {reason}"));
+                    self.messages.push(Message::Tool {
+                        tool_call_id: tc.id.clone(),
+                        content: output.to_string(),
+                    });
+                    continue;
                 }
 
                 // Execute tool
