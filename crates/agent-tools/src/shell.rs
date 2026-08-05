@@ -1,3 +1,5 @@
+use std::process::Stdio;
+
 use agent_core::{Error, RiskLevel, Tool, ToolOutput};
 
 pub struct ShellTool;
@@ -35,6 +37,8 @@ impl Tool for ShellTool {
         let output = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(command)
+            .stdin(Stdio::null())
+            .env("GIT_EDITOR", "true")
             .output()
             .await
             .map_err(|e| Error::Tool(format!("failed to execute command: {e}")))?;
@@ -74,6 +78,24 @@ mod tests {
         let input = serde_json::json!({ "command": "false" });
         let output = tool.call(input).await.unwrap();
         assert!(output.to_string().contains("exit code"));
+    }
+
+    #[tokio::test]
+    async fn child_is_non_interactive() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().to_str().unwrap();
+        let command = format!(
+            "git -C {dir} init -q && git -C {dir} config user.name test && git -C {dir} config user.email test@example.com && touch {dir}/file && git -C {dir} add file; git -C {dir} commit; printf SHELL_RETURNED"
+        );
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            ShellTool.call(serde_json::json!({ "command": command })),
+        )
+        .await
+        .expect("git must not wait for an interactive editor")
+        .unwrap();
+
+        assert_eq!(output.to_string(), "SHELL_RETURNED");
     }
 
     #[tokio::test]
