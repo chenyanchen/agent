@@ -80,14 +80,20 @@ different conversation. Run `agent sessions` to list saved session names.
 
 ### Keybindings
 
-| Key                  | Action                       |
-| -------------------- | ---------------------------- |
-| `Enter`              | Send message                 |
-| `Backspace`          | Delete character             |
-| `←` / `→`            | Move input cursor            |
-| `↑` / `PageUp`       | Scroll chat history up       |
-| `↓` / `PageDown`     | Scroll chat history down     |
-| `Ctrl+C`             | Quit                         |
+| Key                    | Action                                      |
+| ---------------------- | ------------------------------------------- |
+| `Enter`                | Send a non-blank message                    |
+| `Shift+Enter`          | Insert a newline in supported terminals     |
+| `Ctrl+J`               | Insert a newline (compatibility fallback)   |
+| `Backspace`            | Delete character                            |
+| `←` / `→` / `↑` / `↓`  | Move the input cursor                       |
+| `PageUp` / `PageDown`  | Scroll chat history                         |
+| `Ctrl+C`               | Quit                                        |
+
+The input grows to one third of the terminal, then scrolls with the cursor.
+Long lines wrap visually, and multiline pasted text is inserted without being
+submitted. The input title shows `Shift+Enter` when the terminal can report it
+reliably, otherwise it shows `Ctrl+J`.
 
 When a tool needs confirmation, `↑`/`↓` selects Allow or Deny and `Enter`
 confirms the selection. `y`, `n`, and `Esc` are shortcuts; Deny is selected by

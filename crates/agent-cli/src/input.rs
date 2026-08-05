@@ -1,3 +1,7 @@
+use std::ops::Range;
+
+use ratatui::text::Line;
+
 /// A simple UTF-8 aware line-editor buffer with a cursor position (in chars).
 pub struct InputBuffer {
     /// Owned text in the buffer.
@@ -19,6 +23,13 @@ impl InputBuffer {
         let byte_pos = self.char_to_byte(self.cursor);
         self.buf.insert(byte_pos, ch);
         self.cursor += 1;
+    }
+
+    /// Insert pasted text at the current cursor position.
+    pub fn insert_str(&mut self, text: &str) {
+        let byte_pos = self.char_to_byte(self.cursor);
+        self.buf.insert_str(byte_pos, text);
+        self.cursor += text.chars().count();
     }
 
     /// Delete the character immediately before the cursor (backspace semantics).
@@ -47,6 +58,16 @@ impl InputBuffer {
         }
     }
 
+    /// Move the cursor by one visually wrapped row.
+    pub fn move_up(&mut self, width: usize) {
+        self.move_vertical(width, -1);
+    }
+
+    /// Move the cursor by one visually wrapped row.
+    pub fn move_down(&mut self, width: usize) {
+        self.move_vertical(width, 1);
+    }
+
     /// Return the current content as a `&str`.
     pub fn content(&self) -> &str {
         &self.buf
@@ -57,9 +78,59 @@ impl InputBuffer {
         self.cursor
     }
 
-    /// Return `true` when the buffer contains no text.
-    pub fn is_empty(&self) -> bool {
-        self.buf.is_empty()
+    /// Return `true` when the buffer contains only whitespace.
+    pub fn is_blank(&self) -> bool {
+        self.buf.trim().is_empty()
+    }
+
+    /// Character ranges for each visible row at the given terminal width.
+    pub fn visual_rows(&self, width: usize) -> Vec<Range<usize>> {
+        let width = width.max(1);
+        let chars: Vec<char> = self.buf.chars().collect();
+        let mut rows = Vec::new();
+        let mut start = 0;
+        let mut column = 0;
+
+        for (index, ch) in chars.iter().copied().enumerate() {
+            if ch == '\n' {
+                rows.push(start..index);
+                start = index + 1;
+                column = 0;
+                continue;
+            }
+
+            let char_width = Line::from(ch.to_string()).width();
+            if column > 0 && column + char_width > width {
+                rows.push(start..index);
+                start = index;
+                column = 0;
+            }
+            column += char_width;
+        }
+
+        rows.push(start..chars.len());
+        if column >= width && self.cursor == chars.len() {
+            rows.push(chars.len()..chars.len());
+        }
+        rows
+    }
+
+    /// Return the cursor's visual row and display-cell column.
+    pub fn cursor_position(&self, width: usize) -> (usize, usize) {
+        let rows = self.visual_rows(width);
+        let row = rows
+            .iter()
+            .rposition(|range| range.start <= self.cursor && self.cursor <= range.end)
+            .unwrap_or(0);
+        let column = Line::from(
+            self.buf
+                .chars()
+                .skip(rows[row].start)
+                .take(self.cursor.saturating_sub(rows[row].start))
+                .collect::<String>(),
+        )
+        .width();
+        (row, column)
     }
 
     /// Consume the buffer, returning its contents and resetting to empty.
@@ -78,6 +149,29 @@ impl InputBuffer {
             .map(|(b, _)| b)
             .unwrap_or(self.buf.len())
     }
+
+    fn move_vertical(&mut self, width: usize, direction: isize) {
+        let rows = self.visual_rows(width);
+        let (row, column) = self.cursor_position(width);
+        let target = row.saturating_add_signed(direction).min(rows.len() - 1);
+        if target == row {
+            return;
+        }
+
+        let chars: Vec<char> = self.buf.chars().collect();
+        let range = &rows[target];
+        let mut target_cursor = range.start;
+        let mut target_column = 0;
+        for (offset, ch) in chars[range.clone()].iter().copied().enumerate() {
+            let next_column = target_column + Line::from(ch.to_string()).width();
+            if next_column > column {
+                break;
+            }
+            target_column = next_column;
+            target_cursor = range.start + offset + 1;
+        }
+        self.cursor = target_cursor;
+    }
 }
 
 impl Default for InputBuffer {
@@ -95,7 +189,7 @@ mod tests {
     #[test]
     fn new_buffer_is_empty() {
         let buf = InputBuffer::new();
-        assert!(buf.is_empty());
+        assert!(buf.content().is_empty());
         assert_eq!(buf.cursor(), 0);
         assert_eq!(buf.content(), "");
     }
@@ -135,7 +229,7 @@ mod tests {
     fn backspace_at_zero_is_noop() {
         let mut buf = InputBuffer::new();
         buf.backspace(); // must not panic
-        assert!(buf.is_empty());
+        assert!(buf.content().is_empty());
         assert_eq!(buf.cursor(), 0);
     }
 
@@ -146,7 +240,7 @@ mod tests {
         buf.insert('y');
         let taken = buf.take();
         assert_eq!(taken, "xy");
-        assert!(buf.is_empty());
+        assert!(buf.content().is_empty());
         assert_eq!(buf.cursor(), 0);
     }
 
@@ -180,7 +274,39 @@ mod tests {
         assert_eq!(buf.cursor(), 1);
 
         buf.backspace();
-        assert!(buf.is_empty());
+        assert!(buf.content().is_empty());
         assert_eq!(buf.cursor(), 0);
+    }
+
+    #[test]
+    fn wraps_moves_and_preserves_explicit_line_breaks() {
+        let mut buf = InputBuffer::new();
+        buf.insert_str("abcd\nef");
+
+        assert_eq!(buf.visual_rows(3), vec![0..3, 3..4, 5..7]);
+        assert_eq!(buf.cursor_position(3), (2, 2));
+
+        buf.move_up(3);
+        assert_eq!(buf.cursor(), 4);
+        buf.move_up(3);
+        assert_eq!(buf.cursor(), 1);
+        buf.move_down(3);
+        assert_eq!(buf.cursor(), 4);
+    }
+
+    #[test]
+    fn keeps_zero_width_marks_with_their_wrapped_character() {
+        let mut buf = InputBuffer::new();
+        buf.insert_str("e\u{301}");
+        assert_eq!(buf.visual_rows(1), vec![0..2, 2..2]);
+    }
+
+    #[test]
+    fn blank_drafts_are_not_submittable() {
+        let mut buf = InputBuffer::new();
+        buf.insert_str(" \n\t");
+        assert!(buf.is_blank());
+        buf.insert('x');
+        assert!(!buf.is_blank());
     }
 }

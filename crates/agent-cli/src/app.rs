@@ -5,9 +5,15 @@ use std::time::Duration;
 
 use async_openai::config::OpenAIConfig;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -33,6 +39,7 @@ pub struct App {
     pub total_tokens: u32,
     pub should_quit: bool,
     pub confirmation: Option<PendingConfirmation>,
+    pub shift_enter_supported: bool,
 }
 
 struct ConfirmationRequest {
@@ -75,6 +82,7 @@ impl App {
             total_tokens: 0,
             should_quit: false,
             confirmation: None,
+            shift_enter_supported: false,
         }
     }
 
@@ -164,12 +172,20 @@ impl App {
         // events, and capturing them would prevent the terminal emulator from
         // handling native click-and-drag text selection.
         enable_raw_mode()?;
+        let enhanced_keys_supported = supports_keyboard_enhancement().unwrap_or(false);
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+        if enhanced_keys_supported {
+            execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?;
+        }
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;
 
         let mut app = App::new(&config.model.model_id);
+        app.shift_enter_supported = cfg!(windows) || enhanced_keys_supported;
         app.chat_history = restore_chat_history(history);
 
         let result = run_loop(
@@ -183,7 +199,14 @@ impl App {
 
         // ── Terminal cleanup ──────────────────────────────────────────────────
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        if enhanced_keys_supported {
+            execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+        }
+        execute!(
+            terminal.backend_mut(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        )?;
         terminal.show_cursor()?;
 
         result
@@ -257,51 +280,20 @@ async fn run_loop(
 
         // Poll for terminal input with a short timeout so we stay responsive
         // to both keyboard events and agent streaming events.
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-        {
-            if handle_confirmation_key(app, key) {
+        if event::poll(Duration::from_millis(50))? {
+            let terminal_event = event::read()?;
+            if let Event::Key(key) = terminal_event
+                && handle_confirmation_key(app, key)
+            {
                 if app.should_quit {
                     break;
                 }
                 continue;
             }
-            match (key.code, key.modifiers) {
-                // Quit on Ctrl+C
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                    app.should_quit = true;
-                }
-                // Submit on Enter (only when not already running)
-                (KeyCode::Enter, _) => {
-                    if !app.is_running && !app.input.is_empty() {
-                        let text = app.input.take();
-                        app.chat_history.push(ChatEntry::User(text.clone()));
-                        app.is_running = true;
-                        app.scroll_offset = 0;
-                        let _ = input_tx.send(text);
-                    }
-                }
-                // Text editing
-                (KeyCode::Char(ch), _) => {
-                    app.input.insert(ch);
-                }
-                (KeyCode::Backspace, _) => {
-                    app.input.backspace();
-                }
-                (KeyCode::Left, _) => {
-                    app.input.move_left();
-                }
-                (KeyCode::Right, _) => {
-                    app.input.move_right();
-                }
-                // Scroll chat history
-                (KeyCode::Up, _) | (KeyCode::PageUp, _) => {
-                    app.scroll_offset = app.scroll_offset.saturating_add(3);
-                }
-                (KeyCode::Down, _) | (KeyCode::PageDown, _) => {
-                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
-                }
-                _ => {}
+
+            let input_width = terminal.size()?.width.saturating_sub(2) as usize;
+            if let Some(text) = handle_input_event(app, terminal_event, input_width) {
+                let _ = input_tx.send(text);
             }
         }
 
@@ -310,6 +302,47 @@ async fn run_loop(
         }
     }
     Ok(())
+}
+
+fn handle_input_event(app: &mut App, event: Event, width: usize) -> Option<String> {
+    if let Event::Paste(text) = event {
+        app.input
+            .insert_str(&text.replace("\r\n", "\n").replace('\r', "\n"));
+        return None;
+    }
+
+    let Event::Key(key) = event else {
+        return None;
+    };
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+        (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+            app.input.insert('\n')
+        }
+        (KeyCode::Enter, _) => {
+            if !app.is_running && !app.input.is_blank() {
+                let text = app.input.take();
+                app.chat_history.push(ChatEntry::User(text.clone()));
+                app.is_running = true;
+                app.scroll_offset = 0;
+                return Some(text);
+            }
+        }
+        (KeyCode::Char(ch), _) => app.input.insert(ch),
+        (KeyCode::Backspace, _) => app.input.backspace(),
+        (KeyCode::Left, _) => app.input.move_left(),
+        (KeyCode::Right, _) => app.input.move_right(),
+        (KeyCode::Up, _) => app.input.move_up(width),
+        (KeyCode::Down, _) => app.input.move_down(width),
+        (KeyCode::PageUp, _) => {
+            app.scroll_offset = app.scroll_offset.saturating_add(3);
+        }
+        (KeyCode::PageDown, _) => {
+            app.scroll_offset = app.scroll_offset.saturating_sub(3);
+        }
+        _ => {}
+    }
+    None
 }
 
 fn handle_confirmation_key(app: &mut App, key: KeyEvent) -> bool {
@@ -511,5 +544,53 @@ mod tests {
             ChatEntry::ToolResult { name, output } if name == "shell" && output == "/tmp"
         ));
         assert!(matches!(&entries[3], ChatEntry::Assistant(text) if text == "done"));
+    }
+
+    #[test]
+    fn multiline_keys_and_paste_edit_without_submitting() {
+        let mut app = App::new("test-model");
+
+        assert!(
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+                20,
+            )
+            .is_none()
+        );
+        handle_input_event(&mut app, Event::Paste("one\r\ntwo".into()), 20);
+        handle_input_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            20,
+        );
+
+        assert_eq!(app.input.content(), "\none\ntwo\n");
+        assert!(!app.is_running);
+    }
+
+    #[test]
+    fn enter_ignores_blank_draft_and_submits_non_blank_draft() {
+        let mut app = App::new("test-model");
+        app.input.insert_str(" \n");
+        assert!(
+            handle_input_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                20,
+            )
+            .is_none()
+        );
+        assert_eq!(app.input.content(), " \n");
+
+        app.input.insert('x');
+        let submitted = handle_input_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            20,
+        );
+        assert_eq!(submitted.as_deref(), Some(" \nx"));
+        assert!(app.is_running);
+        assert!(app.input.content().is_empty());
     }
 }
