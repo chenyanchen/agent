@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_openai::config::OpenAIConfig;
@@ -11,7 +13,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::{mpsc, oneshot};
 
-use agent_core::{Agent, AgentEvent, Handler, MemoryStorage, OpenAIModel};
+use agent_core::{Agent, AgentEvent, FileStorage, Handler, Message, OpenAIModel, Storage};
 use agent_tools::{EditFileTool, GlobTool, GrepTool, ReadFileTool, ShellTool, WriteFileTool};
 
 use crate::config::Config;
@@ -80,12 +82,12 @@ impl App {
 
     /// Initialise the terminal, spawn the agent background task, and run the
     /// main event loop.  Blocks until the user quits.
-    pub fn run(config: Config) -> io::Result<()> {
+    pub fn run(config: Config, session: String) -> io::Result<()> {
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(async { Self::run_async(config).await })
+        rt.block_on(async { Self::run_async(config, session).await })
     }
 
-    async fn run_async(config: Config) -> io::Result<()> {
+    async fn run_async(config: Config, session: String) -> io::Result<()> {
         // ── Channels ──────────────────────────────────────────────────────────
         let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -103,6 +105,12 @@ impl App {
         let api_base = config.model.api_base.clone();
         let guard_mode = config.guard.mode.clone();
         let event_tx_clone = event_tx.clone();
+        let storage_dir = sessions_dir()?;
+        let storage = FileStorage::new(storage_dir);
+        let history = storage
+            .load(&session)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
 
         tokio::spawn(async move {
             // Build OpenAI config
@@ -119,7 +127,8 @@ impl App {
             let mut agent = Agent::builder()
                 .model(model)
                 .guard(guard_mode)
-                .storage(MemoryStorage::new())
+                .storage(storage)
+                .conversation_id(session)
                 .system_prompt(&system_prompt)
                 .tool(ShellTool)
                 .tool(ReadFileTool)
@@ -161,6 +170,7 @@ impl App {
         let mut terminal = Terminal::new(backend)?;
 
         let mut app = App::new(&config.model.model_id);
+        app.chat_history = restore_chat_history(history);
 
         let result = run_loop(
             &mut terminal,
@@ -178,6 +188,47 @@ impl App {
 
         result
     }
+}
+
+pub(crate) fn sessions_dir() -> io::Result<PathBuf> {
+    dirs::home_dir()
+        .map(|home| home.join(".agent").join("sessions"))
+        .ok_or_else(|| io::Error::other("home directory not found"))
+}
+
+fn restore_chat_history(messages: Vec<Message>) -> Vec<ChatEntry> {
+    let mut entries = Vec::new();
+    let mut tool_names = HashMap::new();
+
+    for message in messages {
+        match message {
+            Message::System { .. } => {}
+            Message::User { content } => entries.push(ChatEntry::User(content)),
+            Message::Assistant { text, tool_calls } => {
+                if let Some(text) = text
+                    && !text.is_empty()
+                {
+                    entries.push(ChatEntry::Assistant(text));
+                }
+                for call in tool_calls {
+                    tool_names.insert(call.id, call.name.clone());
+                    entries.push(ChatEntry::ToolCall {
+                        name: call.name,
+                        arguments: call.arguments,
+                    });
+                }
+            }
+            Message::Tool {
+                tool_call_id,
+                content,
+            } => entries.push(ChatEntry::ToolResult {
+                name: tool_names.get(&tool_call_id).cloned().unwrap_or_default(),
+                output: content,
+            }),
+        }
+    }
+
+    entries
 }
 
 // ── Main event loop ───────────────────────────────────────────────────────────
@@ -387,6 +438,7 @@ impl Handler for TuiHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::ToolCall;
 
     #[test]
     fn confirmation_defaults_to_deny_and_can_be_allowed() {
@@ -420,5 +472,44 @@ mod tests {
             crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         ));
         assert_eq!(response_rx.try_recv(), Ok(true));
+    }
+
+    #[test]
+    fn restores_messages_and_tool_names() {
+        let entries = restore_chat_history(vec![
+            Message::System {
+                content: "hidden".into(),
+            },
+            Message::User {
+                content: "question".into(),
+            },
+            Message::Assistant {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-1".into(),
+                    name: "shell".into(),
+                    arguments: r#"{"command":"pwd"}"#.into(),
+                }],
+            },
+            Message::Tool {
+                tool_call_id: "call-1".into(),
+                content: "/tmp".into(),
+            },
+            Message::Assistant {
+                text: Some("done".into()),
+                tool_calls: vec![],
+            },
+        ]);
+
+        assert!(matches!(&entries[0], ChatEntry::User(text) if text == "question"));
+        assert!(matches!(
+            &entries[1],
+            ChatEntry::ToolCall { name, .. } if name == "shell"
+        ));
+        assert!(matches!(
+            &entries[2],
+            ChatEntry::ToolResult { name, output } if name == "shell" && output == "/tmp"
+        ));
+        assert!(matches!(&entries[3], ChatEntry::Assistant(text) if text == "done"));
     }
 }

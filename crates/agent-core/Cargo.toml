@@ -14,6 +14,7 @@ async-openai = { version = "0.27", optional = true }
 tokio-stream = { version = "0.1", optional = true }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 
 [features]

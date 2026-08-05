@@ -53,7 +53,7 @@ CLI flags override the config file:
 
 ```sh
 agent --model deepseek-chat --api-base https://api.deepseek.com/v1
-agent --auto     # skip all tool-call confirmations
+agent --auto
 ```
 
 If `api_key` is not set in the config, the `OPENAI_API_KEY` environment
@@ -74,6 +74,9 @@ OpenAI and DeepSeek. Typical `api_base` values:
 ## Usage
 
 Run `agent` to start the TUI. Type a message and press `Enter`.
+The default conversation is saved under `~/.agent/sessions/default.json` and
+resumed on the next run. Use `agent --session <name>` to create or resume a
+different conversation. Run `agent sessions` to list saved session names.
 
 ### Keybindings
 
