@@ -21,5 +21,5 @@ pub use guard::{AutoGuard, ConfirmGuard, Decision, Guard};
 pub use handler::{AgentEvent, Handler};
 pub use message::{Message, ToolCall};
 pub use model::{Model, Request, ToolDefinition};
-pub use storage::{MemoryStorage, Storage};
+pub use storage::{FileStorage, MemoryStorage, Storage};
 pub use tool::{RiskLevel, Tool, ToolOutput};
