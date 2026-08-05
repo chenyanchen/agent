@@ -24,14 +24,24 @@ pub enum ChatEntry {
 /// Render the full TUI layout onto `frame`.
 pub fn draw(frame: &mut Frame, app: &App) {
     // ── Layout: chat | status | input ────────────────────────────────────────
+    let frame_area = frame.area();
+    let input_height = if app.confirmation.is_some() {
+        5
+    } else {
+        let rows = app
+            .input
+            .visual_rows(frame_area.width.saturating_sub(2) as usize)
+            .len() as u16;
+        (rows + 2).max(3).min((frame_area.height / 3).max(3))
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // chat area — fills remaining space
             Constraint::Length(1), // status bar — exactly 1 line
-            Constraint::Length(if app.confirmation.is_some() { 5 } else { 3 }),
+            Constraint::Length(input_height),
         ])
-        .split(frame.area());
+        .split(frame_area);
 
     draw_chat(frame, app, chunks[0]);
     draw_status(frame, app, chunks[1]);
@@ -194,32 +204,51 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         return;
     }
 
-    let content = app.input.content();
-    let cursor_pos = app.input.cursor();
+    let width = area.width.saturating_sub(2) as usize;
+    let rows = app.input.visual_rows(width);
+    let (cursor_row, _) = app.input.cursor_position(width);
+    let cursor = app.input.cursor();
+    let chars: Vec<char> = app.input.content().chars().collect();
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if index != cursor_row {
+                return Line::raw(chars[row.clone()].iter().collect::<String>());
+            }
 
-    // Split content around cursor for rendering a block cursor.
-    let chars: Vec<char> = content.chars().collect();
-    let before: String = chars[..cursor_pos].iter().collect();
-    let cursor_char: String = chars.get(cursor_pos).copied().unwrap_or(' ').to_string();
-    let after: String = chars.get(cursor_pos + 1..).unwrap_or(&[]).iter().collect();
+            let cursor = cursor.clamp(row.start, row.end);
+            let before = chars[row.start..cursor].iter().collect::<String>();
+            let cursor_char = if cursor < row.end { chars[cursor] } else { ' ' }.to_string();
+            let after_start = (cursor + usize::from(cursor < row.end)).min(row.end);
+            let after = chars[after_start..row.end].iter().collect::<String>();
+            Line::from(vec![
+                Span::raw(before),
+                Span::styled(
+                    cursor_char,
+                    Style::default().bg(Color::White).fg(Color::Black),
+                ),
+                Span::raw(after),
+            ])
+        })
+        .collect();
 
-    let title = if app.is_running {
-        " Input (waiting...) "
+    let newline_key = if app.shift_enter_supported {
+        "Shift+Enter"
     } else {
-        " Input "
+        "Ctrl+J"
+    };
+    let title = if app.is_running {
+        format!(" Input ({newline_key} for newline, waiting...) ")
+    } else {
+        format!(" Input ({newline_key} for newline) ")
     };
 
-    let input_line = Line::from(vec![
-        Span::raw(before),
-        Span::styled(
-            cursor_char,
-            Style::default().bg(Color::White).fg(Color::Black),
-        ),
-        Span::raw(after),
-    ]);
-
-    let input_widget =
-        Paragraph::new(input_line).block(Block::default().title(title).borders(Borders::ALL));
+    let viewport_height = area.height.saturating_sub(2) as usize;
+    let scroll = cursor_row.saturating_sub(viewport_height.saturating_sub(1)) as u16;
+    let input_widget = Paragraph::new(lines)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .scroll((scroll, 0));
 
     frame.render_widget(input_widget, area);
 }
