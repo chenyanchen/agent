@@ -1,3 +1,5 @@
+use std::process::Stdio;
+
 use agent_core::{Error, RiskLevel, Tool, ToolOutput};
 
 pub struct ShellTool;
@@ -35,6 +37,7 @@ impl Tool for ShellTool {
         let output = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(command)
+            .stdin(Stdio::null())
             .output()
             .await
             .map_err(|e| Error::Tool(format!("failed to execute command: {e}")))?;
@@ -74,6 +77,18 @@ mod tests {
         let input = serde_json::json!({ "command": "false" });
         let output = tool.call(input).await.unwrap();
         assert!(output.to_string().contains("exit code"));
+    }
+
+    #[tokio::test]
+    async fn child_does_not_inherit_terminal_input() {
+        let output = ShellTool
+            .call(serde_json::json!({
+                "command": "if test -t 0; then echo inherited; else echo isolated; fi"
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(output.to_string().trim(), "isolated");
     }
 
     #[tokio::test]
