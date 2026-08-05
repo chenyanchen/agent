@@ -29,7 +29,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Min(1),    // chat area — fills remaining space
             Constraint::Length(1), // status bar — exactly 1 line
-            Constraint::Length(3), // input area — 3 lines (1 content + 2 border)
+            Constraint::Length(if app.confirmation.is_some() { 5 } else { 3 }),
         ])
         .split(frame.area());
 
@@ -118,16 +118,14 @@ fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ]));
     }
 
-    // Compute scroll: show bottom of content by default.
-    let total_lines = lines.len() as u16;
-    let visible_height = area.height.saturating_sub(2); // subtract border
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll = max_scroll.saturating_sub(app.scroll_offset as u16);
-
     let paragraph = Paragraph::new(lines)
         .block(Block::default().title(" Chat ").borders(Borders::ALL))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .wrap(Wrap { trim: false });
+    // line_count includes wrapping and the border, so long tool arguments stay scrollable.
+    let max_scroll =
+        (paragraph.line_count(area.width.saturating_sub(2)) as u16).saturating_sub(area.height);
+    let scroll = max_scroll.saturating_sub(app.scroll_offset as u16);
+    let paragraph = paragraph.scroll((scroll, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -135,7 +133,12 @@ fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 fn draw_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let right_side = if app.is_running {
+    let right_side = if app.confirmation.is_some() {
+        Span::styled(
+            " awaiting confirmation... ",
+            Style::default().fg(Color::Yellow),
+        )
+    } else if app.is_running {
         Span::styled(" thinking... ", Style::default().fg(Color::Yellow))
     } else {
         Span::styled(
@@ -165,6 +168,32 @@ fn draw_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 // ── Input area ────────────────────────────────────────────────────────────────
 
 fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    if let Some(confirmation) = &app.confirmation {
+        let choice = |selected, text| {
+            Line::from(vec![
+                Span::styled(
+                    if selected { "> " } else { "  " },
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(text),
+            ])
+        };
+        let lines = vec![
+            choice(confirmation.allow_selected, "Allow this tool call"),
+            choice(!confirmation.allow_selected, "Deny this tool call"),
+        ];
+        let widget = Paragraph::new(lines).block(
+            Block::default()
+                .title(format!(
+                    " {}({}) ",
+                    confirmation.name, confirmation.arguments
+                ))
+                .borders(Borders::ALL),
+        );
+        frame.render_widget(widget, area);
+        return;
+    }
+
     let content = app.input.content();
     let cursor_pos = app.input.cursor();
 
@@ -193,4 +222,18 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Paragraph::new(input_line).block(Block::default().title(title).borders(Borders::ALL));
 
     frame.render_widget(input_widget, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrapped_chat_lines_contribute_to_scroll_height() {
+        let paragraph = Paragraph::new("12345678901234567890")
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+
+        assert_eq!(paragraph.line_count(6), 6);
+    }
 }

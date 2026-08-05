@@ -43,7 +43,7 @@ api_key  = "sk-..."
 # api_base = "https://api.deepseek.com/v1"
 
 [guard]
-mode = "auto"   # currently the only supported CLI mode
+mode = "confirm"   # default; medium/high-risk tools require confirmation
 
 # Optional custom system prompt
 # system_prompt = "You are a helpful assistant."
@@ -88,6 +88,10 @@ different conversation. Run `agent sessions` to list saved session names.
 | `↑` / `PageUp`       | Scroll chat history up       |
 | `↓` / `PageDown`     | Scroll chat history down     |
 | `Ctrl+C`             | Quit                         |
+
+When a tool needs confirmation, `↑`/`↓` selects Allow or Deny and `Enter`
+confirms the selection. `y`, `n`, and `Esc` are shortcuts; Deny is selected by
+default. Use `agent --auto` to run without confirmation.
 
 Chat content can be selected and copied using your terminal's native
 click-and-drag selection.

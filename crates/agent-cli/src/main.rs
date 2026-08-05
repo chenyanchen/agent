@@ -20,7 +20,7 @@ struct Cli {
     /// Override the OpenAI-compatible API base URL
     #[arg(long)]
     api_base: Option<String>,
-    /// Run in auto mode (currently the only supported mode)
+    /// Run without interactive tool confirmation
     #[arg(long)]
     auto: bool,
     /// Conversation to create or resume
