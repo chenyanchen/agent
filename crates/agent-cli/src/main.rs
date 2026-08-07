@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod input;
+mod markdown;
 mod ui;
 
 use std::fs;

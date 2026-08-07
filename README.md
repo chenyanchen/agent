@@ -102,6 +102,12 @@ default. Use `agent --auto` to run without confirmation.
 Chat content can be selected and copied using your terminal's native
 click-and-drag selection.
 
+User and Assistant messages render CommonMark and GitHub Flavored Markdown,
+including headings, emphasis, lists, quotes, links, code blocks, task lists,
+and tables. User messages use the terminal's reversed colors to remain distinct
+on both dark and light themes. Source line breaks stay visible in chat; narrow
+tables fall back to vertical key/value records.
+
 ## Library usage
 
 ```rust

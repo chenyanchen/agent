@@ -3,10 +3,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::App;
+use crate::{app::App, markdown};
 
 // ── ChatEntry ─────────────────────────────────────────────────────────────────
 
@@ -51,93 +51,86 @@ pub fn draw(frame: &mut Frame, app: &App) {
 // ── Chat area ─────────────────────────────────────────────────────────────────
 
 fn draw_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let mut lines: Vec<Line> = Vec::new();
+    let width = area.width.saturating_sub(2) as usize;
+    let lines = chat_lines(&app.chat_history, &app.streaming_text, width);
 
-    for entry in &app.chat_history {
-        match entry {
-            ChatEntry::User(text) => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "You: ",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(text.clone()),
-                ]));
-            }
-            ChatEntry::Assistant(text) => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "Assistant: ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(text.clone()),
-                ]));
-            }
-            ChatEntry::ToolCall { name, arguments } => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "  [tool] ",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(name.clone(), Style::default().fg(Color::Yellow)),
-                    Span::raw(format!("({arguments})")),
-                ]));
-            }
-            ChatEntry::ToolResult { name, output } => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "  [result] ",
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(name.clone(), Style::default().fg(Color::Magenta)),
-                    Span::raw(format!(": {output}")),
-                ]));
-            }
-            ChatEntry::Error(msg) => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "  [error] ",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(msg.clone(), Style::default().fg(Color::Red)),
-                ]));
-            }
-        }
-    }
-
-    // Append any in-progress streamed text.
-    if !app.streaming_text.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Assistant: ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(app.streaming_text.clone()),
-            // Blinking cursor indicator while streaming
-            Span::styled("▌", Style::default().fg(Color::Cyan)),
-        ]));
-    }
-
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().title(" Chat ").borders(Borders::ALL))
-        .wrap(Wrap { trim: false });
-    // line_count includes wrapping and the border, so long tool arguments stay scrollable.
-    let max_scroll =
-        (paragraph.line_count(area.width.saturating_sub(2)) as u16).saturating_sub(area.height);
-    let scroll = max_scroll.saturating_sub(app.scroll_offset as u16);
+    let paragraph =
+        Paragraph::new(lines).block(Block::default().title(" Chat ").borders(Borders::ALL));
+    let content_height = paragraph
+        .line_count(area.width.saturating_sub(2))
+        .min(u16::MAX as usize) as u16;
+    let max_scroll = content_height.saturating_sub(area.height);
+    let scroll = max_scroll.saturating_sub(app.scroll_offset.min(u16::MAX as usize) as u16);
     let paragraph = paragraph.scroll((scroll, 0));
 
     frame.render_widget(paragraph, area);
+}
+
+fn chat_lines(entries: &[ChatEntry], streaming: &str, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for entry in entries {
+        let entry_lines = match entry {
+            ChatEntry::User(text) => reverse(markdown::render(text, width), width),
+            ChatEntry::Assistant(text) => markdown::render(text, width),
+            ChatEntry::ToolCall { name, arguments } => literal_entry(
+                &format!("[tool] {name}({arguments})"),
+                width,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ChatEntry::ToolResult { name, output } => literal_entry(
+                &format!("[result] {name}: {output}"),
+                width,
+                Style::default().fg(Color::Magenta),
+            ),
+            ChatEntry::Error(message) => literal_entry(
+                &format!("[error] {message}"),
+                width,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        };
+        lines.extend(nonempty(entry_lines));
+        lines.push(Line::default());
+    }
+
+    if !streaming.is_empty() {
+        let mut streaming_lines = nonempty(markdown::render(streaming, width));
+        streaming_lines.last_mut().unwrap().spans.push(Span::styled(
+            "▌",
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+        lines.extend(markdown::wrap_lines(streaming_lines, width));
+    } else {
+        lines.pop();
+    }
+    lines
+}
+
+fn nonempty(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    if lines.is_empty() {
+        lines.push(Line::default());
+    }
+    lines
+}
+
+fn reverse(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    nonempty(lines)
+        .into_iter()
+        .map(|mut line| {
+            line.spans
+                .push(Span::raw(" ".repeat(width.saturating_sub(line.width()))));
+            line.style(Style::default().add_modifier(Modifier::REVERSED))
+        })
+        .collect()
+}
+
+fn literal_entry(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    markdown::literal(text, width)
+        .into_iter()
+        .map(|line| line.style(style))
+        .collect()
 }
 
 // ── Status bar ────────────────────────────────────────────────────────────────
@@ -258,11 +251,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wrapped_chat_lines_contribute_to_scroll_height() {
-        let paragraph = Paragraph::new("12345678901234567890")
-            .block(Block::default().borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
+    fn chat_preserves_markdown_layout_and_role_style() {
+        let lines = chat_lines(
+            &[
+                ChatEntry::User("# Head\nbody".into()),
+                ChatEntry::Assistant("**hi**".into()),
+            ],
+            "",
+            10,
+        );
 
-        assert_eq!(paragraph.line_count(6), 6);
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["Head      ", "          ", "body      ", "", "hi"]
+        );
+        assert!(lines[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(
+            lines[4].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
     }
 }

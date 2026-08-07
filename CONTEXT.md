@@ -13,9 +13,13 @@ A display-only line break introduced when a draft exceeds the available width; i
 _Avoid_: Newline
 
 **Explicit line break**:
-A line break intentionally inserted into the draft and preserved in the submitted message.
+A line break intentionally inserted into the draft, preserved in the submitted message, and shown as a visible line break in the conversation transcript.
 _Avoid_: Soft wrap
 
 **Draft viewport**:
 The visible portion of the draft. It grows with the draft up to one third of the terminal height, then scrolls so every part of the draft remains reachable.
 _Avoid_: Input line
+
+**Chat message**:
+A submitted user message or an Assistant response presented in the conversation transcript. Chat messages use CommonMark with supported GitHub Flavored Markdown extensions. Tool activity and errors are not chat messages and remain literal text.
+_Avoid_: Chat entry
