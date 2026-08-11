@@ -1,8 +1,19 @@
 use agent_core::{Error, RiskLevel, Tool, ToolOutput};
 use regex::Regex;
+use std::path::PathBuf;
 use walkdir::WalkDir;
 
-pub struct GrepTool;
+pub struct GrepTool {
+    workdir: PathBuf,
+}
+
+impl GrepTool {
+    pub fn new(workdir: impl Into<PathBuf>) -> Self {
+        Self {
+            workdir: workdir.into(),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for GrepTool {
@@ -45,7 +56,7 @@ impl Tool for GrepTool {
 
         let mut matches: Vec<String> = Vec::new();
 
-        for entry in WalkDir::new(path)
+        for entry in WalkDir::new(crate::resolve(&self.workdir, path))
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
@@ -88,7 +99,7 @@ mod tests {
             .write_all(b"no match here\nhello again\n")
             .unwrap();
 
-        let tool = GrepTool;
+        let tool = GrepTool::new(".");
         let input = serde_json::json!({
             "pattern": "hello",
             "path": dir.path().to_string_lossy()
@@ -109,7 +120,7 @@ mod tests {
         writeln!(tmp, "line three").unwrap();
         let path = tmp.path().to_string_lossy().to_string();
 
-        let tool = GrepTool;
+        let tool = GrepTool::new(".");
         let input = serde_json::json!({
             "pattern": "matching",
             "path": path
@@ -123,7 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_regex() {
-        let tool = GrepTool;
+        let tool = GrepTool::new(".");
         let input = serde_json::json!({
             "pattern": "[invalid",
             "path": "/tmp"
@@ -134,7 +145,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_pattern_field() {
-        let tool = GrepTool;
+        let tool = GrepTool::new(".");
         let input = serde_json::json!({ "path": "/tmp" });
         let err = tool.call(input).await.unwrap_err();
         assert!(matches!(err, Error::Tool(_)));

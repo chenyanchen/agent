@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 agent-core = { path = "../agent-core" }
 agent-tools = { path = "../agent-tools" }
-async-openai = "0.27"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"

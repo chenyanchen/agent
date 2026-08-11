@@ -11,14 +11,14 @@ use std::path::Path;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "agent", about = "A general-purpose LLM agent")]
+#[command(name = "agent", about = "A general-purpose Responses API agent")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
     /// Override the model ID (e.g. gpt-4o, gpt-4-turbo)
     #[arg(short, long)]
     model: Option<String>,
-    /// Override the OpenAI-compatible API base URL
+    /// Override the OpenAI Responses-compatible API base URL
     #[arg(long)]
     api_base: Option<String>,
     /// Run without interactive tool confirmation

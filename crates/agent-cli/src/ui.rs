@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 
 use crate::{app::App, markdown};
@@ -17,6 +17,7 @@ pub enum ChatEntry {
     ToolCall { name: String, arguments: String },
     ToolResult { name: String, output: String },
     Error(String),
+    Activity(String),
 }
 
 // ── draw ──────────────────────────────────────────────────────────────────────
@@ -46,6 +47,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_chat(frame, app, chunks[0]);
     draw_status(frame, app, chunks[1]);
     draw_input(frame, app, chunks[2]);
+    draw_skill_picker(frame, app, chunks[2]);
 }
 
 // ── Chat area ─────────────────────────────────────────────────────────────────
@@ -89,6 +91,11 @@ fn chat_lines(entries: &[ChatEntry], streaming: &str, width: usize) -> Vec<Line<
                 &format!("[error] {message}"),
                 width,
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            ChatEntry::Activity(message) => literal_entry(
+                &format!("[activity] {message}"),
+                width,
+                Style::default().fg(Color::Cyan),
             ),
         };
         lines.extend(nonempty(entry_lines));
@@ -143,9 +150,20 @@ fn draw_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         )
     } else if app.is_running {
         Span::styled(" thinking... ", Style::default().fg(Color::Yellow))
+    } else if app.pending_retry {
+        Span::styled(
+            " failed — Ctrl+R to retry ",
+            Style::default().fg(Color::Red),
+        )
     } else {
         Span::styled(
-            format!(" tokens: {} ", app.total_tokens),
+            format!(
+                " context: {}/{} (80%: {}) | compacted: {} ",
+                app.input_tokens,
+                app.context_window,
+                (app.context_window as u64 * 8 / 10),
+                app.compaction_count
+            ),
             Style::default().fg(Color::DarkGray),
         )
     };
@@ -166,6 +184,50 @@ fn draw_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let status_bar = Paragraph::new(status_line).style(Style::default().bg(Color::Reset));
 
     frame.render_widget(status_bar, area);
+}
+
+fn draw_skill_picker(frame: &mut Frame, app: &App, input_area: ratatui::layout::Rect) {
+    let Some(selected) = app.skill_selection else {
+        return;
+    };
+    let skills = app.filtered_skills();
+    let height = (skills.len().min(6) as u16 + 2).max(3);
+    let area = ratatui::layout::Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(height),
+        width: input_area.width,
+        height,
+    };
+    let lines = if skills.is_empty() {
+        vec![Line::styled(
+            "No matching skills",
+            Style::default().fg(Color::DarkGray),
+        )]
+    } else {
+        skills
+            .iter()
+            .take(6)
+            .enumerate()
+            .map(|(index, skill)| {
+                Line::from(vec![
+                    Span::styled(
+                        if index == selected { "> " } else { "  " },
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(
+                        format!("${}", skill.name),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!(" — {}", skill.description.trim())),
+                ])
+            })
+            .collect()
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().title(" Skills ").borders(Borders::ALL)),
+        area,
+    );
 }
 
 // ── Input area ────────────────────────────────────────────────────────────────

@@ -1,15 +1,16 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use futures::StreamExt;
 
-use crate::error::Error;
-use crate::event::Event;
+use crate::event::{Event, Usage};
 use crate::guard::{Decision, Guard};
 use crate::handler::{AgentEvent, Handler};
-use crate::message::Message;
-use crate::model::{Model, Request, ToolDefinition};
-use crate::storage::Storage;
+use crate::instructions::load_agents;
+use crate::skills::{SkillCatalog, SkillInfo};
+use crate::storage::{SessionState, Storage};
 use crate::tool::{Tool, ToolOutput};
+use crate::{Error, Message, Model, Request, ToolCall, ToolDefinition};
 
 pub struct Agent<M, G, S>
 where
@@ -22,8 +23,13 @@ where
     storage: S,
     conversation_id: String,
     tools: BTreeMap<String, Box<dyn Tool>>,
-    system_prompt: String,
-    messages: Vec<Message>,
+    base_prompt: String,
+    project_instructions: String,
+    workdir: PathBuf,
+    user_skills_dir: PathBuf,
+    skills: SkillCatalog,
+    context_window: u32,
+    state: SessionState,
 }
 
 impl<M, G, S> Agent<M, G, S>
@@ -36,224 +42,271 @@ where
         AgentBuilder::new()
     }
 
+    pub fn transcript(&self) -> &[Message] {
+        &self.state.transcript
+    }
+
+    pub fn skills(&self) -> &[SkillInfo] {
+        &self.skills.skills
+    }
+
+    pub fn has_pending_request(&self) -> bool {
+        self.state.pending_request.is_some()
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.state.last_error.as_deref()
+    }
+
+    pub fn last_input_tokens(&self) -> u32 {
+        self.state.last_input_tokens
+    }
+
+    pub fn compaction_count(&self) -> u64 {
+        self.state.compaction_count
+    }
+
     pub async fn run(&mut self, user_input: &str, handler: &dyn Handler) -> Result<(), Error> {
-        if self.messages.is_empty() {
-            self.messages = self.storage.load(&self.conversation_id).await?;
+        if self.state.pending_request.is_some() {
+            return Err(Error::Other(
+                "a failed request is pending; retry it before submitting a new message".into(),
+            ));
         }
 
-        // Add user message to history
-        self.messages.push(Message::User {
-            content: user_input.to_string(),
-        });
-
-        // Build tool definitions once — tools don't change during a run.
-        let tool_definitions: Vec<ToolDefinition> = self
-            .tools
-            .values()
-            .map(|t| ToolDefinition {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                parameters: t.schema(),
+        self.skills = SkillCatalog::scan(&self.workdir, &self.user_skills_dir);
+        handler
+            .on_event(AgentEvent::SkillsUpdated {
+                skills: self.skills.skills.clone(),
+                warnings: self.skills.warnings.clone(),
             })
-            .collect();
+            .await;
+        self.skills.validate_explicit(user_input)?;
 
+        self.state.transcript.push(Message::User {
+            content: user_input.to_owned(),
+        });
+        let mut input = self.state.context.clone();
+        input.push(serde_json::json!({
+            "role": "user",
+            "content": user_input
+        }));
+        self.set_pending(input).await?;
+        self.execute_pending(handler).await
+    }
+
+    pub async fn retry(&mut self, handler: &dyn Handler) -> Result<(), Error> {
+        if self.state.pending_request.is_none() {
+            return Err(Error::Other("there is no pending request to retry".into()));
+        }
+        self.execute_pending(handler).await
+    }
+
+    async fn set_pending(&mut self, input: Vec<serde_json::Value>) -> Result<(), Error> {
+        self.state.pending_request = Some(Request {
+            instructions: self.instructions(),
+            input,
+            tools: self.tool_definitions(),
+            compact_threshold: ((self.context_window as u64 * 8) / 10) as u32,
+        });
+        self.state.last_error = None;
+        self.save().await
+    }
+
+    async fn execute_pending(&mut self, handler: &dyn Handler) -> Result<(), Error> {
         loop {
-            // Build request
-            let request = Request {
-                system: if self.system_prompt.is_empty() {
-                    None
-                } else {
-                    Some(self.system_prompt.clone())
-                },
-                messages: self.messages.clone(),
-                tools: tool_definitions.clone(),
-                temperature: None,
-                max_tokens: None,
-            };
-
-            // Stream from model
-            let mut stream = self.model.stream(request).await?;
-
-            // Consume stream events
-            let mut accumulated_text = String::new();
-            // Map from id -> (name, accumulated_arguments)
-            let mut pending_tool_calls: HashMap<String, (String, String)> = HashMap::new();
-            let mut tool_call_order: Vec<String> = Vec::new();
-            let mut usage = crate::event::Usage::default();
-
-            while let Some(event) = stream.next().await {
-                match event {
-                    Event::TextDelta(ref delta) => {
-                        handler.on_event(AgentEvent::TextDelta(delta.clone())).await;
-                        accumulated_text.push_str(delta);
-                    }
-                    Event::ToolCallBegin { ref id, ref name } => {
-                        if !pending_tool_calls.contains_key(id) {
-                            tool_call_order.push(id.clone());
-                        }
-                        pending_tool_calls.insert(id.clone(), (name.clone(), String::new()));
-                    }
-                    Event::ToolCallDelta {
-                        ref id,
-                        ref arguments_delta,
-                    } => {
-                        if let Some((_, args)) = pending_tool_calls.get_mut(id) {
-                            args.push_str(arguments_delta);
-                        }
-                    }
-                    Event::ToolCallEnd { id: _ } => {
-                        // nothing extra needed
-                    }
-                    Event::Done { usage: u } => {
-                        usage = u;
-                    }
-                }
-            }
-
-            // Build the tool_calls list in order
-            let tool_calls: Vec<crate::message::ToolCall> = tool_call_order
-                .iter()
-                .filter_map(|id| {
-                    pending_tool_calls
-                        .get(id)
-                        .map(|(name, arguments)| crate::message::ToolCall {
-                            id: id.clone(),
-                            name: name.clone(),
-                            arguments: arguments.clone(),
+            let request = self
+                .state
+                .pending_request
+                .clone()
+                .ok_or_else(|| Error::Other("pending request disappeared".into()))?;
+            let result = self.execute_request(request.clone(), handler).await;
+            let (text, output, usage) = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    self.state.last_error = Some(error.to_string());
+                    self.save().await?;
+                    handler
+                        .on_event(AgentEvent::Failed {
+                            error: error.to_string(),
+                            retryable: true,
                         })
-                })
-                .collect();
-
-            // Add assistant message to history
-            let text = if accumulated_text.is_empty() {
-                None
-            } else {
-                Some(accumulated_text)
+                        .await;
+                    return Err(error);
+                }
             };
-            self.messages.push(Message::Assistant {
-                text,
+
+            let compacted = output
+                .iter()
+                .filter(|item| item["type"] == "compaction")
+                .count() as u64;
+            self.state.context = request.input;
+            self.state.context.extend(output.clone());
+            if let Some(index) = self
+                .state
+                .context
+                .iter()
+                .rposition(|item| item["type"] == "compaction")
+            {
+                self.state.context.drain(..index);
+            }
+            self.state.compaction_count += compacted;
+            self.state.last_input_tokens = usage.input_tokens;
+            self.state.pending_request = None;
+            self.state.last_error = None;
+
+            let tool_calls = function_calls(&output);
+            self.state.transcript.push(Message::Assistant {
+                text: (!text.is_empty()).then_some(text),
                 tool_calls: tool_calls.clone(),
             });
+            self.save().await?;
 
-            // If no tool calls, we're done
+            if compacted > 0 {
+                handler
+                    .on_event(AgentEvent::Compacted {
+                        total: self.state.compaction_count,
+                    })
+                    .await;
+            }
             if tool_calls.is_empty() {
-                self.storage
-                    .save(&self.conversation_id, &self.messages)
-                    .await?;
-                handler.on_event(AgentEvent::TurnComplete { usage }).await;
+                handler
+                    .on_event(AgentEvent::TurnComplete {
+                        usage,
+                        context_window: self.context_window,
+                    })
+                    .await;
                 return Ok(());
             }
 
-            // Execute each tool call
-            for tc in &tool_calls {
-                // Parse arguments
-                let input: serde_json::Value = match serde_json::from_str(&tc.arguments) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let output = ToolOutput::Error(format!("invalid arguments JSON: {e}"));
-                        handler
-                            .on_event(AgentEvent::ToolCallBegin {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                            })
-                            .await;
-                        handler
-                            .on_event(AgentEvent::ToolCallEnd {
-                                id: tc.id.clone(),
-                                output: output.clone(),
-                            })
-                            .await;
-                        self.messages.push(Message::Tool {
-                            tool_call_id: tc.id.clone(),
-                            content: output.to_string(),
-                        });
-                        continue;
-                    }
-                };
-
-                let Some(tool) = self.tools.get(&tc.name) else {
-                    let output = ToolOutput::Error(format!("unknown tool: {}", tc.name));
-                    handler
-                        .on_event(AgentEvent::ToolCallBegin {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                        })
-                        .await;
-                    handler
-                        .on_event(AgentEvent::ToolCallEnd {
-                            id: tc.id.clone(),
-                            output: output.clone(),
-                        })
-                        .await;
-                    self.messages.push(Message::Tool {
-                        tool_call_id: tc.id.clone(),
-                        content: output.to_string(),
-                    });
-                    continue;
-                };
-
-                handler
-                    .on_event(AgentEvent::ToolCallBegin {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
-                    })
-                    .await;
-
-                // Check guard
-                let decision = self.guard.check(&tc.name, tool.risk_level(), &input).await;
-                let denial_reason = match decision {
-                    Decision::Deny(reason) => Some(reason),
-                    Decision::NeedConfirm if !handler.confirm(&tc.name, &input).await => {
-                        Some("user denied confirmation".to_string())
-                    }
-                    Decision::NeedConfirm | Decision::Allow => None,
-                };
-                if let Some(reason) = denial_reason {
-                    handler
-                        .on_event(AgentEvent::ToolCallDenied {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            reason: reason.clone(),
-                        })
-                        .await;
-                    let output = ToolOutput::Error(format!("denied: {reason}"));
-                    self.messages.push(Message::Tool {
-                        tool_call_id: tc.id.clone(),
-                        content: output.to_string(),
-                    });
-                    continue;
-                }
-
-                // Execute tool
-                let output = match tool.call(input).await {
-                    Ok(out) => out,
-                    Err(e) => ToolOutput::Error(e.to_string()),
-                };
-
-                // Emit ToolCallEnd
-                handler
-                    .on_event(AgentEvent::ToolCallEnd {
-                        id: tc.id.clone(),
-                        output: output.clone(),
-                    })
-                    .await;
-
-                // Add tool result message to history
-                self.messages.push(Message::Tool {
-                    tool_call_id: tc.id.clone(),
-                    content: output.to_string(),
-                });
-            }
-
-            // Loop back to stream again with tool results
+            self.execute_tools(&tool_calls, handler).await;
+            self.save().await?;
+            self.set_pending(self.state.context.clone()).await?;
         }
+    }
+
+    async fn execute_request(
+        &self,
+        request: Request,
+        handler: &dyn Handler,
+    ) -> Result<(String, Vec<serde_json::Value>, Usage), Error> {
+        let mut stream = self.model.stream(request).await?;
+        let mut text = String::new();
+        let mut output = Vec::new();
+        let mut usage = None;
+        while let Some(event) = stream.next().await {
+            match event? {
+                Event::TextDelta(delta) => {
+                    text.push_str(&delta);
+                    handler.on_event(AgentEvent::TextDelta(delta)).await;
+                }
+                Event::OutputItem(item) => output.push(item),
+                Event::Done { usage: value } => usage = Some(value),
+            }
+        }
+        let usage =
+            usage.ok_or_else(|| Error::Model("response stream ended before completion".into()))?;
+        Ok((text, output, usage))
+    }
+
+    async fn execute_tools(&mut self, calls: &[ToolCall], handler: &dyn Handler) {
+        for call in calls {
+            handler
+                .on_event(AgentEvent::ToolCallBegin {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                })
+                .await;
+
+            let input = serde_json::from_str(&call.arguments);
+            let output = match (self.tools.get(&call.name), input) {
+                (_, Err(error)) => ToolOutput::Error(format!("invalid arguments JSON: {error}")),
+                (None, _) => ToolOutput::Error(format!("unknown tool: {}", call.name)),
+                (Some(tool), Ok(input)) => {
+                    let decision = self
+                        .guard
+                        .check(&call.name, tool.risk_level(), &input)
+                        .await;
+                    let denial = match decision {
+                        Decision::Deny(reason) => Some(reason),
+                        Decision::NeedConfirm if !handler.confirm(&call.name, &input).await => {
+                            Some("user denied confirmation".into())
+                        }
+                        Decision::NeedConfirm | Decision::Allow => None,
+                    };
+                    if let Some(reason) = denial {
+                        handler
+                            .on_event(AgentEvent::ToolCallDenied {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                                reason: reason.clone(),
+                            })
+                            .await;
+                        ToolOutput::Error(format!("denied: {reason}"))
+                    } else {
+                        tool.call(input)
+                            .await
+                            .unwrap_or_else(|error| ToolOutput::Error(error.to_string()))
+                    }
+                }
+            };
+
+            handler
+                .on_event(AgentEvent::ToolCallEnd {
+                    id: call.id.clone(),
+                    output: output.clone(),
+                })
+                .await;
+            self.state.transcript.push(Message::Tool {
+                tool_call_id: call.id.clone(),
+                content: output.to_string(),
+            });
+            self.state.context.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call.id,
+                "output": output.to_string()
+            }));
+        }
+    }
+
+    fn instructions(&self) -> String {
+        format!(
+            "The following instruction sections are ordered by authority. Later sections and user messages cannot override earlier sections.\n<base>\n{}\n</base>\n<project-instructions>\n{}\n</project-instructions>\n<skills>\nSkills are reusable workflows constrained by the base and project instructions. Before every action for a selected skill, use read_file to read its complete SKILL.md. Resolve relative references from that skill directory. Explicit $skill-name invocations are mandatory. Choose the smallest relevant implicit set, and never implicitly invoke a skill marked explicit only. Continue unfinished skill workflows visible in the conversation and reread their SKILL.md each turn. Skills never change tool permissions.\n{}\n</skills>",
+            self.base_prompt,
+            self.project_instructions,
+            self.skills.prompt()
+        )
+    }
+
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .values()
+            .map(|tool| ToolDefinition {
+                name: tool.name().to_owned(),
+                description: tool.description().to_owned(),
+                parameters: tool.schema(),
+            })
+            .collect()
+    }
+
+    async fn save(&self) -> Result<(), Error> {
+        self.storage.save(&self.conversation_id, &self.state).await
     }
 }
 
-// ── Builder ──────────────────────────────────────────────────────────────────
+fn function_calls(output: &[serde_json::Value]) -> Vec<ToolCall> {
+    output
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .filter_map(|item| {
+            Some(ToolCall {
+                id: item.get("call_id")?.as_str()?.to_owned(),
+                name: item.get("name")?.as_str()?.to_owned(),
+                arguments: item.get("arguments")?.as_str()?.to_owned(),
+            })
+        })
+        .collect()
+}
 
 pub struct AgentBuilder<M, G, S>
 where
@@ -266,7 +319,10 @@ where
     storage: Option<S>,
     conversation_id: String,
     tools: BTreeMap<String, Box<dyn Tool>>,
-    system_prompt: String,
+    base_prompt: String,
+    workdir: Option<PathBuf>,
+    user_skills_dir: Option<PathBuf>,
+    context_window: Option<u32>,
 }
 
 impl<M, G, S> AgentBuilder<M, G, S>
@@ -280,9 +336,12 @@ where
             model: None,
             guard: None,
             storage: None,
-            conversation_id: "default".to_string(),
+            conversation_id: "default".into(),
             tools: BTreeMap::new(),
-            system_prompt: String::new(),
+            base_prompt: String::new(),
+            workdir: None,
+            user_skills_dir: None,
+            context_window: None,
         }
     }
 
@@ -307,381 +366,265 @@ where
     }
 
     pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
-        self.tools.insert(tool.name().to_string(), Box::new(tool));
+        self.tools.insert(tool.name().to_owned(), Box::new(tool));
         self
     }
 
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.system_prompt = prompt.into();
+        self.base_prompt = prompt.into();
         self
     }
 
-    pub fn build(self) -> Agent<M, G, S> {
-        Agent {
-            model: self.model.expect("model is required"),
-            guard: self.guard.expect("guard is required"),
-            storage: self.storage.expect("storage is required"),
+    pub fn workdir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.workdir = Some(path.into());
+        self
+    }
+
+    pub fn user_skills_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.user_skills_dir = Some(path.into());
+        self
+    }
+
+    pub fn context_window(mut self, tokens: u32) -> Self {
+        self.context_window = Some(tokens);
+        self
+    }
+
+    pub async fn build(self) -> Result<Agent<M, G, S>, Error> {
+        let workdir = self
+            .workdir
+            .ok_or_else(|| Error::Other("workdir is required".into()))?;
+        let context_window = self
+            .context_window
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                Error::Other("model.context_window must be a positive integer".into())
+            })?;
+        let storage = self
+            .storage
+            .ok_or_else(|| Error::Other("storage is required".into()))?;
+        let state = storage.load(&self.conversation_id).await?;
+        let project_instructions = load_agents(&workdir)?;
+        let user_skills_dir = self.user_skills_dir.unwrap_or_default();
+        let skills = SkillCatalog::scan(&workdir, &user_skills_dir);
+        Ok(Agent {
+            model: self
+                .model
+                .ok_or_else(|| Error::Other("model is required".into()))?,
+            guard: self
+                .guard
+                .ok_or_else(|| Error::Other("guard is required".into()))?,
+            storage,
             conversation_id: self.conversation_id,
             tools: self.tools,
-            system_prompt: self.system_prompt,
-            messages: Vec::new(),
-        }
+            base_prompt: self.base_prompt,
+            project_instructions,
+            workdir,
+            user_skills_dir,
+            skills,
+            context_window,
+            state,
+        })
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::event::{Event, Usage};
-    use crate::guard::AutoGuard;
-    use crate::storage::MemoryStorage;
-    use crate::tool::RiskLevel;
+    use crate::{AutoGuard, MemoryStorage, RiskLevel, StreamResponse};
 
-    // ── MockModel ────────────────────────────────────────────────────────────
+    type MockResponses = Arc<Mutex<Vec<Result<Vec<Event>, String>>>>;
 
+    #[derive(Clone)]
     struct MockModel {
-        // Each call to stream() returns the next Vec<Event> in sequence
-        responses: Arc<Mutex<Vec<Vec<Event>>>>,
+        responses: MockResponses,
         requests: Arc<Mutex<Vec<Request>>>,
-    }
-
-    impl MockModel {
-        fn new(responses: Vec<Vec<Event>>) -> Self {
-            Self {
-                responses: Arc::new(Mutex::new(responses)),
-                requests: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn with_requests(responses: Vec<Vec<Event>>, requests: Arc<Mutex<Vec<Request>>>) -> Self {
-            Self {
-                responses: Arc::new(Mutex::new(responses)),
-                requests,
-            }
-        }
     }
 
     #[async_trait::async_trait]
     impl Model for MockModel {
-        async fn stream(&self, request: Request) -> Result<crate::event::StreamResponse, Error> {
+        async fn stream(&self, request: Request) -> Result<StreamResponse, Error> {
             self.requests.lock().unwrap().push(request);
-            let mut lock = self.responses.lock().unwrap();
-            if lock.is_empty() {
-                return Err(Error::Model("no more responses".to_string()));
+            match self.responses.lock().unwrap().remove(0) {
+                Ok(events) => Ok(StreamResponse::from_events(events)),
+                Err(error) => Err(Error::Model(error)),
             }
-            let events = lock.remove(0);
-            Ok(crate::event::StreamResponse::from_events(events))
         }
     }
 
-    // ── MockTool ─────────────────────────────────────────────────────────────
-
-    struct MockTool;
+    struct NoopHandler;
 
     #[async_trait::async_trait]
-    impl Tool for MockTool {
+    impl Handler for NoopHandler {
+        async fn on_event(&self, _: AgentEvent) {}
+        async fn confirm(&self, _: &str, _: &serde_json::Value) -> bool {
+            false
+        }
+    }
+
+    struct EchoTool;
+
+    #[async_trait::async_trait]
+    impl Tool for EchoTool {
         fn name(&self) -> &str {
-            "mock_tool"
+            "echo"
         }
-
         fn description(&self) -> &str {
-            "A mock tool for testing."
+            "echo input"
         }
-
         fn schema(&self) -> serde_json::Value {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "input": { "type": "string" }
-                },
-                "required": ["input"]
-            })
+            serde_json::json!({"type":"object"})
         }
-
         fn risk_level(&self) -> RiskLevel {
             RiskLevel::Low
         }
-
         async fn call(&self, input: serde_json::Value) -> Result<ToolOutput, Error> {
-            let text = input.get("input").and_then(|v| v.as_str()).unwrap_or("");
-            Ok(ToolOutput::Text(format!("output: {text}")))
+            Ok(ToolOutput::Text(input.to_string()))
         }
     }
 
-    struct HighRiskTool(Arc<AtomicBool>);
-
-    #[async_trait::async_trait]
-    impl Tool for HighRiskTool {
-        fn name(&self) -> &str {
-            "high_risk_tool"
-        }
-
-        fn description(&self) -> &str {
-            "A high-risk tool for testing."
-        }
-
-        fn schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-
-        fn risk_level(&self) -> RiskLevel {
-            RiskLevel::High
-        }
-
-        async fn call(&self, _input: serde_json::Value) -> Result<ToolOutput, Error> {
-            self.0.store(true, Ordering::SeqCst);
-            Ok(ToolOutput::Text("called".to_string()))
+    fn model(responses: Vec<Result<Vec<Event>, String>>) -> MockModel {
+        MockModel {
+            responses: Arc::new(Mutex::new(responses)),
+            requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    // ── CollectingHandler ────────────────────────────────────────────────────
-
-    struct CollectingHandler {
-        events: Arc<Mutex<Vec<AgentEvent>>>,
-        confirmed: bool,
+    async fn agent(
+        model: MockModel,
+        storage: MemoryStorage,
+        workdir: &Path,
+    ) -> Agent<MockModel, AutoGuard, MemoryStorage> {
+        Agent::builder()
+            .model(model)
+            .guard(AutoGuard)
+            .storage(storage)
+            .workdir(workdir)
+            .user_skills_dir(workdir.join("user-skills"))
+            .context_window(100)
+            .build()
+            .await
+            .unwrap()
     }
-
-    impl CollectingHandler {
-        fn new() -> Self {
-            Self {
-                events: Arc::new(Mutex::new(Vec::new())),
-                confirmed: true,
-            }
-        }
-
-        fn denying() -> Self {
-            Self {
-                events: Arc::new(Mutex::new(Vec::new())),
-                confirmed: false,
-            }
-        }
-
-        fn collected(&self) -> Vec<AgentEvent> {
-            self.events.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Handler for CollectingHandler {
-        async fn on_event(&self, event: AgentEvent) {
-            self.events.lock().unwrap().push(event);
-        }
-
-        async fn confirm(&self, _tool_name: &str, _input: &serde_json::Value) -> bool {
-            self.confirmed
-        }
-    }
-
-    // ── Tests ────────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_agent_simple_text_response() {
-        let model = MockModel::new(vec![vec![
-            Event::TextDelta("Hello, world!".to_string()),
+    async fn compaction_prunes_only_canonical_context_and_preserves_transcript() {
+        let workdir = tempfile::tempdir().unwrap();
+        let storage = MemoryStorage::new();
+        let model = model(vec![Ok(vec![
+            Event::TextDelta("done".into()),
+            Event::OutputItem(
+                serde_json::json!({"type":"compaction","encrypted_content":"opaque"}),
+            ),
+            Event::OutputItem(
+                serde_json::json!({"type":"message","role":"assistant","content":[]}),
+            ),
             Event::Done {
                 usage: Usage {
-                    prompt_tokens: 5,
-                    completion_tokens: 3,
-                    total_tokens: 8,
+                    input_tokens: 81,
+                    output_tokens: 2,
+                    total_tokens: 83,
                 },
             },
-        ]]);
+        ])]);
+        let mut agent = agent(model, storage.clone(), workdir.path()).await;
 
-        let handler = CollectingHandler::new();
-
-        let mut agent = Agent::builder()
-            .model(model)
-            .guard(AutoGuard)
-            .storage(MemoryStorage::new())
-            .system_prompt("You are helpful.")
-            .build();
-
-        agent.run("Hi", &handler).await.unwrap();
-
-        let events = handler.collected();
-
-        // Should have TextDelta and TurnComplete
+        agent.run("remember me", &NoopHandler).await.unwrap();
+        let saved = storage.load("default").await.unwrap();
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::TextDelta(s) if s == "Hello, world!")),
-            "expected TextDelta with 'Hello, world!'"
+            matches!(&saved.transcript[0], Message::User { content } if content == "remember me")
         );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::TurnComplete { .. })),
-            "expected TurnComplete"
-        );
+        assert_eq!(saved.context[0]["type"], "compaction");
+        assert_eq!(saved.compaction_count, 1);
+        assert!(saved.pending_request.is_none());
     }
 
     #[tokio::test]
-    async fn test_agent_tool_call_loop() {
-        // First model call returns a tool call, second returns text
-        let model = MockModel::new(vec![
-            // Turn 1: model wants to call mock_tool
-            vec![
-                Event::ToolCallBegin {
-                    id: "call_1".to_string(),
-                    name: "mock_tool".to_string(),
-                },
-                Event::ToolCallDelta {
-                    id: "call_1".to_string(),
-                    arguments_delta: r#"{"input":"hello"}"#.to_string(),
-                },
-                Event::ToolCallEnd {
-                    id: "call_1".to_string(),
-                },
-                Event::Done {
-                    usage: Usage::default(),
-                },
-            ],
-            // Turn 2: model returns text after seeing tool result
-            vec![
-                Event::TextDelta("Done!".to_string()),
-                Event::Done {
-                    usage: Usage {
-                        prompt_tokens: 10,
-                        completion_tokens: 1,
-                        total_tokens: 11,
-                    },
-                },
-            ],
-        ]);
-
-        let handler = CollectingHandler::new();
-
-        let mut agent = Agent::builder()
-            .model(model)
-            .guard(AutoGuard)
-            .storage(MemoryStorage::new())
-            .tool(MockTool)
-            .build();
-
-        agent.run("Use mock_tool", &handler).await.unwrap();
-
-        let events = handler.collected();
-
-        // Should have ToolCallBegin with correct name
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AgentEvent::ToolCallBegin { id, name, .. }
-                if id == "call_1" && name == "mock_tool"
-            )),
-            "expected ToolCallBegin for call_1/mock_tool"
-        );
-
-        // Should have ToolCallEnd with correct output
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AgentEvent::ToolCallEnd { id, output: ToolOutput::Text(s) }
-                if id == "call_1" && s == "output: hello"
-            )),
-            "expected ToolCallEnd with 'output: hello'"
-        );
-
-        // Should have TextDelta from second model turn
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::TextDelta(s) if s == "Done!")),
-            "expected TextDelta 'Done!'"
-        );
-
-        // Should end with TurnComplete
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::TurnComplete { .. })),
-            "expected TurnComplete"
-        );
-    }
-    #[tokio::test]
-    async fn denied_high_risk_tool_is_not_executed() {
-        let model = MockModel::new(vec![
-            vec![
-                Event::ToolCallBegin {
-                    id: "call_1".to_string(),
-                    name: "high_risk_tool".to_string(),
-                },
-                Event::ToolCallDelta {
-                    id: "call_1".to_string(),
-                    arguments_delta: "{}".to_string(),
-                },
-                Event::Done {
-                    usage: Usage::default(),
-                },
-            ],
-            vec![
-                Event::TextDelta("Denied safely.".to_string()),
-                Event::Done {
-                    usage: Usage::default(),
-                },
-            ],
-        ]);
-        let called = Arc::new(AtomicBool::new(false));
-        let handler = CollectingHandler::denying();
-        let mut agent = Agent::builder()
-            .model(model)
-            .guard(crate::guard::ConfirmGuard)
-            .storage(MemoryStorage::new())
-            .tool(HighRiskTool(called.clone()))
-            .build();
-
-        agent.run("Use the tool", &handler).await.unwrap();
-
-        assert!(!called.load(Ordering::SeqCst));
-        assert!(handler.collected().iter().any(|event| matches!(
-            event,
-            AgentEvent::ToolCallDenied { name, .. } if name == "high_risk_tool"
-        )));
-    }
-
-    #[tokio::test]
-    async fn test_agent_loads_and_saves_conversation() {
+    async fn failed_request_is_persisted_and_retry_is_exact() {
+        let workdir = tempfile::tempdir().unwrap();
         let storage = MemoryStorage::new();
-        storage
-            .save(
-                "default",
-                &[Message::Assistant {
-                    text: Some("old answer".to_string()),
-                    tool_calls: vec![],
-                }],
-            )
+        let model = model(vec![
+            Err("network".into()),
+            Ok(vec![Event::Done {
+                usage: Usage::default(),
+            }]),
+        ]);
+        let requests = model.requests.clone();
+        let mut agent = agent(model, storage.clone(), workdir.path()).await;
+
+        assert!(agent.run("once", &NoopHandler).await.is_err());
+        assert!(
+            storage
+                .load("default")
+                .await
+                .unwrap()
+                .pending_request
+                .is_some()
+        );
+        agent.retry(&NoopHandler).await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(
+            agent
+                .transcript()
+                .iter()
+                .filter(|message| matches!(message, Message::User { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_function_call_and_output_are_chained_to_next_response() {
+        let workdir = tempfile::tempdir().unwrap();
+        let storage = MemoryStorage::new();
+        let model = model(vec![
+            Ok(vec![
+                Event::OutputItem(serde_json::json!({
+                    "type":"function_call",
+                    "call_id":"call-1",
+                    "name":"echo",
+                    "arguments":"{\"value\":1}"
+                })),
+                Event::Done {
+                    usage: Usage::default(),
+                },
+            ]),
+            Ok(vec![
+                Event::TextDelta("done".into()),
+                Event::OutputItem(
+                    serde_json::json!({"type":"message","role":"assistant","content":[]}),
+                ),
+                Event::Done {
+                    usage: Usage::default(),
+                },
+            ]),
+        ]);
+        let requests = model.requests.clone();
+        let mut agent = Agent::builder()
+            .model(model)
+            .guard(AutoGuard)
+            .storage(storage)
+            .workdir(workdir.path())
+            .user_skills_dir(workdir.path().join("skills"))
+            .context_window(100)
+            .tool(EchoTool)
+            .build()
             .await
             .unwrap();
 
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let model = MockModel::with_requests(
-            vec![vec![
-                Event::TextDelta("new answer".to_string()),
-                Event::Done {
-                    usage: Usage::default(),
-                },
-            ]],
-            requests.clone(),
+        agent.run("go", &NoopHandler).await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1]
+                .input
+                .iter()
+                .any(|item| item["type"] == "function_call_output" && item["call_id"] == "call-1")
         );
-        let handler = CollectingHandler::new();
-
-        let mut agent = Agent::builder()
-            .model(model)
-            .guard(AutoGuard)
-            .storage(storage.clone())
-            .build();
-
-        agent.run("new question", &handler).await.unwrap();
-
-        let seen_len = requests.lock().unwrap()[0].messages.len();
-        assert_eq!(seen_len, 2);
-
-        let saved = storage.load("default").await.unwrap();
-        assert_eq!(saved.len(), 3);
+        assert_eq!(agent.transcript().len(), 4);
     }
 }

@@ -37,6 +37,7 @@ pub struct ModelConfig {
     pub model_id: String,
     pub api_key: Option<String>,
     pub api_base: Option<String>,
+    pub context_window: Option<u32>,
 }
 
 fn default_model_id() -> String {
@@ -49,6 +50,7 @@ impl Default for ModelConfig {
             model_id: default_model_id(),
             api_key: None,
             api_base: None,
+            context_window: None,
         }
     }
 }
@@ -62,7 +64,7 @@ pub struct GuardConfig {
 }
 
 fn default_guard_mode() -> GuardMode {
-    GuardMode::Auto
+    GuardMode::Confirm
 }
 
 impl Default for GuardConfig {
@@ -109,7 +111,8 @@ mod tests {
         assert_eq!(cfg.model.model_id, "gpt-4o");
         assert!(cfg.model.api_key.is_none());
         assert!(cfg.model.api_base.is_none());
-        assert_eq!(cfg.guard.mode, GuardMode::Auto);
+        assert!(cfg.model.context_window.is_none());
+        assert_eq!(cfg.guard.mode, GuardMode::Confirm);
         assert!(cfg.system_prompt.is_none());
     }
 
@@ -122,6 +125,7 @@ system_prompt = "You are a helpful assistant."
 model_id = "gpt-4-turbo"
 api_key = "sk-test"
 api_base = "https://my.proxy/v1"
+context_window = 128000
 
 [guard]
 mode = "auto"
@@ -130,6 +134,7 @@ mode = "auto"
         assert_eq!(cfg.model.model_id, "gpt-4-turbo");
         assert_eq!(cfg.model.api_key.as_deref(), Some("sk-test"));
         assert_eq!(cfg.model.api_base.as_deref(), Some("https://my.proxy/v1"));
+        assert_eq!(cfg.model.context_window, Some(128000));
         assert_eq!(cfg.guard.mode, GuardMode::Auto);
         assert_eq!(
             cfg.system_prompt.as_deref(),
@@ -146,13 +151,13 @@ model_id = "gpt-3.5-turbo"
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.model.model_id, "gpt-3.5-turbo");
         assert!(cfg.model.api_key.is_none());
-        assert_eq!(cfg.guard.mode, GuardMode::Auto);
+        assert_eq!(cfg.guard.mode, GuardMode::Confirm);
     }
 
     #[test]
     fn parse_empty_toml_is_all_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.model.model_id, "gpt-4o");
-        assert_eq!(cfg.guard.mode, GuardMode::Auto);
+        assert_eq!(cfg.guard.mode, GuardMode::Confirm);
     }
 }

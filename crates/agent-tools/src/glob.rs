@@ -1,6 +1,17 @@
 use agent_core::{Error, RiskLevel, Tool, ToolOutput};
+use std::path::PathBuf;
 
-pub struct GlobTool;
+pub struct GlobTool {
+    workdir: PathBuf,
+}
+
+impl GlobTool {
+    pub fn new(workdir: impl Into<PathBuf>) -> Self {
+        Self {
+            workdir: workdir.into(),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for GlobTool {
@@ -32,7 +43,8 @@ impl Tool for GlobTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Tool("missing 'pattern' field".to_string()))?;
 
-        let paths: Vec<String> = glob::glob(pattern)
+        let resolved = crate::resolve(&self.workdir, pattern);
+        let paths: Vec<String> = glob::glob(&resolved.to_string_lossy())
             .map_err(|e| Error::Tool(format!("invalid glob pattern: {e}")))?
             .filter_map(|entry| entry.ok())
             .map(|p| p.to_string_lossy().into_owned())
@@ -63,7 +75,7 @@ mod tests {
         std::fs::File::create(&c).unwrap().write_all(b"").unwrap();
 
         let pattern = format!("{}/*.txt", dir.path().display());
-        let tool = GlobTool;
+        let tool = GlobTool::new(".");
         let input = serde_json::json!({ "pattern": pattern });
         let output = tool.call(input).await.unwrap();
         let text = output.to_string();
@@ -77,7 +89,7 @@ mod tests {
     async fn no_matches_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         let pattern = format!("{}/*.nomatch", dir.path().display());
-        let tool = GlobTool;
+        let tool = GlobTool::new(".");
         let input = serde_json::json!({ "pattern": pattern });
         let output = tool.call(input).await.unwrap();
         assert_eq!(output.to_string(), "");
@@ -85,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_pattern_field() {
-        let tool = GlobTool;
+        let tool = GlobTool::new(".");
         let input = serde_json::json!({});
         let err = tool.call(input).await.unwrap_err();
         assert!(matches!(err, Error::Tool(_)));
