@@ -510,7 +510,7 @@ fn handle_agent_event(app: &mut App, event: AgentEvent) {
         AgentEvent::SkillsUpdated { skills, warnings } => {
             app.skills = skills;
             app.chat_history
-                .extend(warnings.into_iter().map(ChatEntry::Error));
+                .extend(warnings.into_iter().map(ChatEntry::Activity));
         }
         AgentEvent::Compacted { total } => {
             app.compaction_count = total;

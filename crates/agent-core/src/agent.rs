@@ -73,7 +73,7 @@ where
             ));
         }
 
-        self.skills = SkillCatalog::scan(&self.workdir, &self.user_skills_dir);
+        self.skills = SkillCatalog::scan(&self.workdir, &self.user_skills_dir, self.context_window);
         handler
             .on_event(AgentEvent::SkillsUpdated {
                 skills: self.skills.skills.clone(),
@@ -406,7 +406,7 @@ where
         let state = storage.load(&self.conversation_id).await?;
         let project_instructions = load_agents(&workdir)?;
         let user_skills_dir = self.user_skills_dir.unwrap_or_default();
-        let skills = SkillCatalog::scan(&workdir, &user_skills_dir);
+        let skills = SkillCatalog::scan(&workdir, &user_skills_dir, context_window);
         Ok(Agent {
             model: self
                 .model

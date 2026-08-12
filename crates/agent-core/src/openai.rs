@@ -63,8 +63,7 @@ fn request_body(model_id: &str, request: Request) -> serde_json::Value {
         "context_management": [{
             "type": "compaction",
             "compact_threshold": request.compact_threshold
-        }],
-        "truncation": "disabled"
+        }]
     })
 }
 
@@ -129,7 +128,7 @@ mod tests {
         let body = request_body("test", request);
         assert_eq!(body["store"], false);
         assert_eq!(body["stream"], true);
-        assert_eq!(body["truncation"], "disabled");
+        assert!(body.get("truncation").is_none());
         assert_eq!(body["include"][0], "reasoning.encrypted_content");
         assert_eq!(body["context_management"][0]["compact_threshold"], 80);
         assert!(body.get("previous_response_id").is_none());
