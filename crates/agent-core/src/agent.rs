@@ -68,9 +68,16 @@ where
 
     pub async fn run(&mut self, user_input: &str, handler: &dyn Handler) -> Result<(), Error> {
         if self.state.pending_request.is_some() {
-            return Err(Error::Other(
+            let error = Error::Other(
                 "a failed request is pending; retry it before submitting a new message".into(),
-            ));
+            );
+            handler
+                .on_event(AgentEvent::Failed {
+                    error: error.to_string(),
+                    retryable: true,
+                })
+                .await;
+            return Err(error);
         }
 
         self.skills = SkillCatalog::scan(&self.workdir, &self.user_skills_dir, self.context_window);
@@ -465,6 +472,22 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingHandler {
+        events: Mutex<Vec<AgentEvent>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Handler for RecordingHandler {
+        async fn on_event(&self, event: AgentEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        async fn confirm(&self, _: &str, _: &serde_json::Value) -> bool {
+            false
+        }
+    }
+
     struct EchoTool;
 
     #[async_trait::async_trait]
@@ -575,6 +598,27 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn submitting_while_retry_is_pending_emits_failure() {
+        let workdir = tempfile::tempdir().unwrap();
+        let storage = MemoryStorage::new();
+        let mut agent = agent(model(vec![Err("network".into())]), storage, workdir.path()).await;
+        let handler = RecordingHandler::default();
+
+        assert!(agent.run("once", &handler).await.is_err());
+        let before = handler.events.lock().unwrap().len();
+        assert!(agent.run("twice", &handler).await.is_err());
+        let events = handler.events.lock().unwrap();
+
+        assert!(events[before..].iter().any(|event| matches!(
+            event,
+            AgentEvent::Failed {
+                retryable: true,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
