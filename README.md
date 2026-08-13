@@ -57,7 +57,9 @@ agent --auto
 ```
 
 If `api_key` is not set in the config, the `OPENAI_API_KEY` environment
-variable is used as a fallback.
+variable is used as a fallback. A missing config file uses these defaults;
+an unreadable or invalid config reports its path and parse location instead of
+silently ignoring the problem.
 
 Agent uses only the Responses API with `store=false` and official server-side
 compaction at 80% of `context_window`. The configured endpoint must implement

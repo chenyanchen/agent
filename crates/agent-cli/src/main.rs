@@ -44,7 +44,7 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    let mut cfg = config::Config::load();
+    let mut cfg = config::Config::load().map_err(io::Error::other)?;
 
     // CLI args take precedence over config file.
     if let Some(model_id) = cli.model {
