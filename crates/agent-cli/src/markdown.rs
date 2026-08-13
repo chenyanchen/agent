@@ -547,7 +547,7 @@ impl Table {
                 }
                 lines.push(line);
             }
-            if row_index == 0 && row_count > 1 {
+            if row_index + 1 < row_count {
                 lines.push(table_border('├', '┼', '┤', &widths, border));
             }
         }
@@ -756,6 +756,27 @@ mod tests {
         assert_eq!(
             strings(&render(source, 7)),
             ["Name: a", "lpha", "Value: ", "somethi", "ng long"]
+        );
+    }
+
+    #[test]
+    fn tables_separate_every_logical_row() {
+        let source = "| Name | Value |\n| --- | --- |\n| Langfuse | full stack |\n| LangSmith | agent tracing |";
+        let lines = strings(&render(source, 30));
+
+        assert_eq!(lines.iter().filter(|line| line.starts_with('├')).count(), 2);
+        let langfuse = lines
+            .iter()
+            .position(|line| line.contains("Langfuse"))
+            .unwrap();
+        let langsmith = lines
+            .iter()
+            .position(|line| line.contains("LangSmith"))
+            .unwrap();
+        assert!(
+            lines[langfuse + 1..langsmith]
+                .iter()
+                .any(|line| line.starts_with('├'))
         );
     }
 }
