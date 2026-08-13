@@ -4,6 +4,26 @@ Agent CLI provides a terminal conversation interface in which users compose and 
 
 ## Language
 
+**Self-hosting milestone**:
+The point at which the primary user can use Agent CLI to develop and verify Agent itself through several real repository tasks, making further evolution a practical learning loop.
+_Avoid_: Autonomous self-improvement, production parity, final product
+
+**Skill**:
+A locally discovered, reusable workflow whose instructions and resources guide Agent only when an explicit or implicit invocation selects it.
+_Avoid_: Plugin, tool, permanent prompt
+
+**Workdir**:
+The directory selected when Agent CLI starts, anchoring project instructions, local skill discovery, and relative tool paths for that process.
+_Avoid_: Git root, repository root, workspace object
+
+**Canonical context**:
+The provider-ready Responses item sequence used for the next model request. It may contain opaque compaction state and remains distinct from the human-readable transcript.
+_Avoid_: Transcript, memory, summary
+
+**Compaction**:
+The server-side replacement of older canonical context with opaque state so a conversation can continue within its model context window without rewriting the transcript.
+_Avoid_: Truncation, local summary
+
 **Draft**:
 The user-authored message being edited before submission. A draft may contain explicit line breaks and may be visually wrapped without changing its content.
 _Avoid_: Input, prompt

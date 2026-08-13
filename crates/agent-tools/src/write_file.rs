@@ -1,6 +1,17 @@
 use agent_core::{Error, RiskLevel, Tool, ToolOutput};
+use std::path::PathBuf;
 
-pub struct WriteFileTool;
+pub struct WriteFileTool {
+    workdir: PathBuf,
+}
+
+impl WriteFileTool {
+    pub fn new(workdir: impl Into<PathBuf>) -> Self {
+        Self {
+            workdir: workdir.into(),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for WriteFileTool {
@@ -38,7 +49,8 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Tool("missing 'content' field".to_string()))?;
 
-        if let Some(parent) = std::path::Path::new(path).parent()
+        let resolved = crate::resolve(&self.workdir, path);
+        if let Some(parent) = resolved.parent()
             && !parent.as_os_str().is_empty()
         {
             tokio::fs::create_dir_all(parent)
@@ -46,11 +58,17 @@ impl Tool for WriteFileTool {
                 .map_err(|e| Error::Tool(format!("failed to create directories: {e}")))?;
         }
 
-        tokio::fs::write(path, content)
-            .await
-            .map_err(|e| Error::Tool(format!("failed to write file '{path}': {e}")))?;
+        tokio::fs::write(&resolved, content).await.map_err(|e| {
+            Error::Tool(format!(
+                "failed to write file '{}': {e}",
+                resolved.display()
+            ))
+        })?;
 
-        Ok(ToolOutput::Text(format!("Written to {path}")))
+        Ok(ToolOutput::Text(format!(
+            "Written to {}",
+            resolved.display()
+        )))
     }
 }
 
@@ -64,7 +82,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         let path_str = path.to_string_lossy().to_string();
 
-        let tool = WriteFileTool;
+        let tool = WriteFileTool::new(".");
         let input = serde_json::json!({ "path": path_str, "content": "hello write" });
         let output = tool.call(input).await.unwrap();
         assert!(output.to_string().contains(&path_str));
@@ -79,7 +97,7 @@ mod tests {
         let path = dir.path().join("sub").join("dir").join("file.txt");
         let path_str = path.to_string_lossy().to_string();
 
-        let tool = WriteFileTool;
+        let tool = WriteFileTool::new(".");
         let input = serde_json::json!({ "path": path_str, "content": "nested" });
         tool.call(input).await.unwrap();
 
@@ -89,7 +107,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_content_field() {
-        let tool = WriteFileTool;
+        let tool = WriteFileTool::new(".");
         let input = serde_json::json!({ "path": "/tmp/whatever.txt" });
         let err = tool.call(input).await.unwrap_err();
         assert!(matches!(err, Error::Tool(_)));

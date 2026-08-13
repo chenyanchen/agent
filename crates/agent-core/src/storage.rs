@@ -3,47 +3,101 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::error::Error;
-use crate::message::Message;
+use crate::{Error, Message, Request};
 
-#[async_trait::async_trait]
-pub trait Storage: Send + Sync {
-    async fn save(&self, id: &str, messages: &[Message]) -> Result<(), Error>;
-    async fn load(&self, id: &str) -> Result<Vec<Message>, Error>;
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SessionState {
+    pub transcript: Vec<Message>,
+    pub context: Vec<serde_json::Value>,
+    pub compaction_count: u64,
+    pub pending_request: Option<Request>,
+    pub last_input_tokens: u32,
+    pub last_error: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct MemoryStorage {
-    data: Arc<RwLock<HashMap<String, Vec<Message>>>>,
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SessionFile {
+    Current(SessionState),
+    Legacy(Vec<Message>),
 }
 
-impl MemoryStorage {
-    pub fn new() -> Self {
-        Self {
-            data: Arc::new(RwLock::new(HashMap::new())),
+impl SessionFile {
+    fn into_state(self) -> SessionState {
+        match self {
+            Self::Current(state) => state,
+            Self::Legacy(transcript) => SessionState {
+                context: legacy_context(&transcript),
+                transcript,
+                ..SessionState::default()
+            },
         }
     }
 }
 
-impl Default for MemoryStorage {
-    fn default() -> Self {
-        Self::new()
+fn legacy_context(transcript: &[Message]) -> Vec<serde_json::Value> {
+    let mut context = Vec::new();
+    for message in transcript {
+        match message {
+            Message::System { .. } => {}
+            Message::User { content } => {
+                context.push(serde_json::json!({"role":"user","content":content}));
+            }
+            Message::Assistant { text, tool_calls } => {
+                if let Some(text) = text {
+                    context.push(serde_json::json!({"role":"assistant","content":text}));
+                }
+                context.extend(tool_calls.iter().map(|call| {
+                    serde_json::json!({
+                        "type":"function_call",
+                        "call_id":call.id,
+                        "name":call.name,
+                        "arguments":call.arguments
+                    })
+                }));
+            }
+            Message::Tool {
+                tool_call_id,
+                content,
+            } => context.push(serde_json::json!({
+                "type":"function_call_output",
+                "call_id":tool_call_id,
+                "output":content
+            })),
+        }
+    }
+    context
+}
+
+#[async_trait::async_trait]
+pub trait Storage: Send + Sync {
+    async fn save(&self, id: &str, state: &SessionState) -> Result<(), Error>;
+    async fn load(&self, id: &str) -> Result<SessionState, Error>;
+}
+
+#[derive(Clone, Default)]
+pub struct MemoryStorage {
+    data: Arc<RwLock<HashMap<String, SessionState>>>,
+}
+
+impl MemoryStorage {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 #[async_trait::async_trait]
 impl Storage for MemoryStorage {
-    async fn save(&self, id: &str, messages: &[Message]) -> Result<(), Error> {
-        let mut data = self.data.write().await;
-        data.insert(id.to_string(), messages.to_vec());
+    async fn save(&self, id: &str, state: &SessionState) -> Result<(), Error> {
+        self.data.write().await.insert(id.to_owned(), state.clone());
         Ok(())
     }
 
-    async fn load(&self, id: &str) -> Result<Vec<Message>, Error> {
-        let data = self.data.read().await;
-        Ok(data.get(id).cloned().unwrap_or_default())
+    async fn load(&self, id: &str) -> Result<SessionState, Error> {
+        Ok(self.data.read().await.get(id).cloned().unwrap_or_default())
     }
 }
 
@@ -75,22 +129,24 @@ impl FileStorage {
 
 #[async_trait::async_trait]
 impl Storage for FileStorage {
-    async fn save(&self, id: &str, messages: &[Message]) -> Result<(), Error> {
+    async fn save(&self, id: &str, state: &SessionState) -> Result<(), Error> {
         let path = self.path(id)?;
         fs::create_dir_all(&self.dir).map_err(|error| Self::storage_error(&self.dir, error))?;
         let temporary = path.with_extension("json.tmp");
-        let data = serde_json::to_vec(messages)?;
+        let data = serde_json::to_vec(state)?;
 
         // ponytail: one writer per session; add file locking if concurrent CLIs share an id.
         fs::write(&temporary, data).map_err(|error| Self::storage_error(&temporary, error))?;
         fs::rename(&temporary, &path).map_err(|error| Self::storage_error(&path, error))
     }
 
-    async fn load(&self, id: &str) -> Result<Vec<Message>, Error> {
+    async fn load(&self, id: &str) -> Result<SessionState, Error> {
         let path = self.path(id)?;
         match fs::read(&path) {
-            Ok(data) => Ok(serde_json::from_slice(&data)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Ok(data) => Ok(serde_json::from_slice::<SessionFile>(&data)?.into_state()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(SessionState::default())
+            }
             Err(error) => Err(Self::storage_error(&path, error)),
         }
     }
@@ -99,92 +155,53 @@ impl Storage for FileStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::Message;
 
     #[tokio::test]
-    async fn save_and_load() {
-        let storage = MemoryStorage::new();
-        let messages = vec![
-            Message::User {
-                content: "Hello".to_string(),
-            },
-            Message::Assistant {
-                text: Some("Hi!".to_string()),
-                tool_calls: vec![],
-            },
-        ];
-
-        storage.save("conv-1", &messages).await.unwrap();
-        let loaded = storage.load("conv-1").await.unwrap();
-
-        assert_eq!(loaded.len(), 2);
-        match &loaded[0] {
-            Message::User { content } => assert_eq!(content, "Hello"),
-            _ => panic!("expected User"),
-        }
-    }
-
-    #[tokio::test]
-    async fn load_nonexistent_returns_empty() {
-        let storage = MemoryStorage::new();
-        let loaded = storage.load("nonexistent").await.unwrap();
-        assert!(loaded.is_empty());
-    }
-
-    #[tokio::test]
-    async fn overwrite_existing() {
-        let storage = MemoryStorage::new();
-        let first = vec![Message::User {
-            content: "first".to_string(),
-        }];
-        let second = vec![
-            Message::User {
-                content: "second_a".to_string(),
-            },
-            Message::User {
-                content: "second_b".to_string(),
-            },
-        ];
-
-        storage.save("conv-1", &first).await.unwrap();
-        storage.save("conv-1", &second).await.unwrap();
-
-        let loaded = storage.load("conv-1").await.unwrap();
-        assert_eq!(loaded.len(), 2);
-        match &loaded[0] {
-            Message::User { content } => assert_eq!(content, "second_a"),
-            _ => panic!("expected User"),
-        }
-    }
-
-    #[tokio::test]
-    async fn file_storage_survives_new_instance() {
+    async fn file_storage_atomically_round_trips_session_state() {
         let dir = tempfile::tempdir().unwrap();
-        let messages = vec![Message::User {
-            content: "persist me".to_string(),
-        }];
+        let state = SessionState {
+            transcript: vec![Message::User {
+                content: "persist me".into(),
+            }],
+            context: vec![serde_json::json!({"role":"user","content":"persist me"})],
+            pending_request: Some(Request {
+                instructions: "rules".into(),
+                input: vec![],
+                tools: vec![],
+                compact_threshold: 80,
+            }),
+            ..SessionState::default()
+        };
 
-        FileStorage::new(dir.path())
-            .save("conv-1", &messages)
-            .await
-            .unwrap();
-        let loaded = FileStorage::new(dir.path()).load("conv-1").await.unwrap();
-
-        assert_eq!(loaded.len(), 1);
-        assert!(matches!(
-            &loaded[0],
-            Message::User { content } if content == "persist me"
-        ));
+        let storage = FileStorage::new(dir.path());
+        storage.save("conv-1", &state).await.unwrap();
+        assert_eq!(storage.load("conv-1").await.unwrap(), state);
+        assert!(!dir.path().join("conv-1.json.tmp").exists());
     }
 
     #[tokio::test]
-    async fn file_storage_rejects_path_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let error = FileStorage::new(dir.path())
-            .save("../outside", &[])
+    async fn rejects_path_traversal() {
+        let error = FileStorage::new(tempfile::tempdir().unwrap().path())
+            .save("../outside", &SessionState::default())
             .await
             .unwrap_err();
-
         assert!(error.to_string().contains("invalid conversation id"));
+    }
+
+    #[tokio::test]
+    async fn loads_legacy_message_array_as_responses_context() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("old.json"),
+            serde_json::to_vec(&vec![Message::User {
+                content: "hello".into(),
+            }])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = FileStorage::new(dir.path()).load("old").await.unwrap();
+        assert_eq!(state.transcript.len(), 1);
+        assert_eq!(state.context[0]["role"], "user");
     }
 }

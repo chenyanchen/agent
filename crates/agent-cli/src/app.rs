@@ -3,7 +3,6 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use async_openai::config::OpenAIConfig;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -19,7 +18,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::{mpsc, oneshot};
 
-use agent_core::{Agent, AgentEvent, FileStorage, Handler, Message, OpenAIModel, Storage};
+use agent_core::{Agent, AgentEvent, FileStorage, Handler, Message, OpenAIModel, SkillInfo};
 use agent_tools::{EditFileTool, GlobTool, GrepTool, ReadFileTool, ShellTool, WriteFileTool};
 
 use crate::config::Config;
@@ -36,10 +35,20 @@ pub struct App {
     pub scroll_offset: usize,
     pub is_running: bool,
     pub model_id: String,
-    pub total_tokens: u32,
+    pub input_tokens: u32,
+    pub context_window: u32,
+    pub compaction_count: u64,
     pub should_quit: bool,
     pub confirmation: Option<PendingConfirmation>,
     pub shift_enter_supported: bool,
+    pub pending_retry: bool,
+    pub skills: Vec<SkillInfo>,
+    pub skill_selection: Option<usize>,
+}
+
+enum AgentCommand {
+    Submit(String),
+    Retry,
 }
 
 struct ConfirmationRequest {
@@ -71,7 +80,7 @@ impl PendingConfirmation {
 }
 
 impl App {
-    fn new(model_id: impl Into<String>) -> Self {
+    fn new(model_id: impl Into<String>, context_window: u32) -> Self {
         Self {
             input: InputBuffer::new(),
             chat_history: Vec::new(),
@@ -79,11 +88,26 @@ impl App {
             scroll_offset: 0,
             is_running: false,
             model_id: model_id.into(),
-            total_tokens: 0,
+            input_tokens: 0,
+            context_window,
+            compaction_count: 0,
             should_quit: false,
             confirmation: None,
             shift_enter_supported: false,
+            pending_retry: false,
+            skills: Vec::new(),
+            skill_selection: None,
         }
+    }
+
+    pub(crate) fn filtered_skills(&self) -> Vec<&SkillInfo> {
+        let Some(query) = self.input.dollar_query() else {
+            return Vec::new();
+        };
+        self.skills
+            .iter()
+            .filter(|skill| skill.name.contains(&query))
+            .collect()
     }
 
     // ── Entry point ───────────────────────────────────────────────────────────
@@ -97,7 +121,7 @@ impl App {
 
     async fn run_async(config: Config, session: String) -> io::Result<()> {
         // ── Channels ──────────────────────────────────────────────────────────
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<AgentCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let (confirmation_tx, mut confirmation_rx) =
             mpsc::unbounded_channel::<ConfirmationRequest>();
@@ -109,58 +133,63 @@ impl App {
             .unwrap_or_else(|| "You are a general-purpose AI assistant with access to shell, file, and search tools. Be concise and helpful.".into());
 
         let model_id = config.model.model_id.clone();
-        let api_key = config.model.api_key.clone();
-        let api_base = config.model.api_base.clone();
-        let guard_mode = config.guard.mode.clone();
+        let context_window = config
+            .model
+            .context_window
+            .ok_or_else(|| io::Error::other("model.context_window must be configured"))?;
+        let workdir = std::env::current_dir()?;
+        let user_skills_dir = dirs::home_dir()
+            .ok_or_else(|| io::Error::other("home directory not found"))?
+            .join(".agents/skills");
         let event_tx_clone = event_tx.clone();
         let storage_dir = sessions_dir()?;
         let storage = FileStorage::new(storage_dir);
-        let history = storage
-            .load(&session)
+        let model = OpenAIModel::with_settings(
+            model_id,
+            config.model.api_key.clone(),
+            config.model.api_base.clone(),
+        );
+        let mut agent = Agent::builder()
+            .model(model)
+            .guard(config.guard.mode.clone())
+            .storage(storage)
+            .conversation_id(session)
+            .system_prompt(&system_prompt)
+            .workdir(&workdir)
+            .user_skills_dir(user_skills_dir)
+            .context_window(context_window)
+            .tool(ShellTool::new(&workdir))
+            .tool(ReadFileTool::new(&workdir))
+            .tool(WriteFileTool::new(&workdir))
+            .tool(EditFileTool::new(&workdir))
+            .tool(GlobTool::new(&workdir))
+            .tool(GrepTool::new(&workdir))
+            .build()
             .await
             .map_err(|error| io::Error::other(error.to_string()))?;
+        let history = agent.transcript().to_vec();
+        let skills = agent.skills().to_vec();
+        let pending_retry = agent.has_pending_request();
+        let last_error = agent.last_error().map(str::to_owned);
+        let input_tokens = agent.last_input_tokens();
+        let compaction_count = agent.compaction_count();
 
         tokio::spawn(async move {
-            // Build OpenAI config
-            let mut oai_cfg = OpenAIConfig::new();
-            if let Some(key) = api_key {
-                oai_cfg = oai_cfg.with_api_key(key);
-            }
-            if let Some(base) = api_base {
-                oai_cfg = oai_cfg.with_api_base(base);
-            }
-
-            let model = OpenAIModel::with_config(model_id, oai_cfg);
-
-            let mut agent = Agent::builder()
-                .model(model)
-                .guard(guard_mode)
-                .storage(storage)
-                .conversation_id(session)
-                .system_prompt(&system_prompt)
-                .tool(ShellTool)
-                .tool(ReadFileTool)
-                .tool(WriteFileTool)
-                .tool(EditFileTool)
-                .tool(GlobTool)
-                .tool(GrepTool)
-                .build();
-
             let handler = TuiHandler {
                 tx: event_tx_clone.clone(),
                 confirmation_tx,
             };
-            while let Some(user_input) = input_rx.recv().await {
-                if let Err(e) = agent.run(&user_input, &handler).await {
-                    let _ = event_tx_clone.send(AgentEvent::TurnComplete {
-                        usage: agent_core::Usage::default(),
-                    });
-                    // Surface the error as a chat entry via a special path;
-                    // we encode it into a ToolCallDenied so app can detect it.
-                    let _ = event_tx_clone.send(AgentEvent::ToolCallDenied {
-                        id: "__error__".into(),
-                        name: "__error__".into(),
-                        reason: e.to_string(),
+            while let Some(command) = input_rx.recv().await {
+                let result = match command {
+                    AgentCommand::Submit(input) => agent.run(&input, &handler).await,
+                    AgentCommand::Retry => agent.retry(&handler).await,
+                };
+                if let Err(error) = result
+                    && agent.last_error().is_none()
+                {
+                    let _ = event_tx_clone.send(AgentEvent::Failed {
+                        error: error.to_string(),
+                        retryable: agent.has_pending_request(),
                     });
                 }
             }
@@ -184,9 +213,16 @@ impl App {
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;
 
-        let mut app = App::new(&config.model.model_id);
+        let mut app = App::new(&config.model.model_id, context_window);
         app.shift_enter_supported = cfg!(windows) || enhanced_keys_supported;
         app.chat_history = restore_chat_history(history);
+        app.skills = skills;
+        app.pending_retry = pending_retry;
+        app.input_tokens = input_tokens;
+        app.compaction_count = compaction_count;
+        if let Some(error) = last_error {
+            app.chat_history.push(ChatEntry::Error(error));
+        }
 
         let result = run_loop(
             &mut terminal,
@@ -259,7 +295,7 @@ fn restore_chat_history(messages: Vec<Message>) -> Vec<ChatEntry> {
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    input_tx: &mpsc::UnboundedSender<String>,
+    input_tx: &mpsc::UnboundedSender<AgentCommand>,
     event_rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
     confirmation_rx: &mut mpsc::UnboundedReceiver<ConfirmationRequest>,
 ) -> io::Result<()> {
@@ -292,8 +328,8 @@ async fn run_loop(
             }
 
             let input_width = terminal.size()?.width.saturating_sub(2) as usize;
-            if let Some(text) = handle_input_event(app, terminal_event, input_width) {
-                let _ = input_tx.send(text);
+            if let Some(command) = handle_input_event(app, terminal_event, input_width) {
+                let _ = input_tx.send(command);
             }
         }
 
@@ -304,7 +340,7 @@ async fn run_loop(
     Ok(())
 }
 
-fn handle_input_event(app: &mut App, event: Event, width: usize) -> Option<String> {
+fn handle_input_event(app: &mut App, event: Event, width: usize) -> Option<AgentCommand> {
     if let Event::Paste(text) = event {
         app.input
             .insert_str(&text.replace("\r\n", "\n").replace('\r', "\n"));
@@ -314,6 +350,44 @@ fn handle_input_event(app: &mut App, event: Event, width: usize) -> Option<Strin
     let Event::Key(key) = event else {
         return None;
     };
+    if app.skill_selection.is_some() {
+        match key.code {
+            KeyCode::Esc => app.skill_selection = None,
+            KeyCode::Up => {
+                let len = app.filtered_skills().len();
+                if len > 0 {
+                    app.skill_selection = Some(app.skill_selection.unwrap().saturating_sub(1));
+                }
+            }
+            KeyCode::Down => {
+                let len = app.filtered_skills().len();
+                if len > 0 {
+                    app.skill_selection = Some((app.skill_selection.unwrap() + 1).min(len - 1));
+                }
+            }
+            KeyCode::Enter => {
+                let name = app
+                    .filtered_skills()
+                    .get(app.skill_selection.unwrap())
+                    .map(|skill| skill.name.clone());
+                if let Some(name) = name {
+                    app.input.complete_dollar(&name);
+                }
+                app.skill_selection = None;
+            }
+            KeyCode::Char(ch) => {
+                app.input.insert(ch);
+                app.skill_selection = Some(0);
+            }
+            KeyCode::Backspace => {
+                app.input.backspace();
+                app.skill_selection = app.input.dollar_query().map(|_| 0);
+            }
+            _ => app.skill_selection = None,
+        }
+        return None;
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
         (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
@@ -325,10 +399,20 @@ fn handle_input_event(app: &mut App, event: Event, width: usize) -> Option<Strin
                 app.chat_history.push(ChatEntry::User(text.clone()));
                 app.is_running = true;
                 app.scroll_offset = 0;
-                return Some(text);
+                app.pending_retry = false;
+                return Some(AgentCommand::Submit(text));
             }
         }
-        (KeyCode::Char(ch), _) => app.input.insert(ch),
+        (KeyCode::Char('r'), KeyModifiers::CONTROL) if app.pending_retry && !app.is_running => {
+            app.is_running = true;
+            return Some(AgentCommand::Retry);
+        }
+        (KeyCode::Char(ch), _) => {
+            app.input.insert(ch);
+            if ch == '$' && !app.skills.is_empty() {
+                app.skill_selection = Some(0);
+            }
+        }
         (KeyCode::Backspace, _) => app.input.backspace(),
         (KeyCode::Left, _) => app.input.move_left(),
         (KeyCode::Right, _) => app.input.move_right(),
@@ -387,14 +471,15 @@ fn handle_agent_event(app: &mut App, event: AgentEvent) {
         AgentEvent::ToolCallBegin {
             name, arguments, ..
         } => {
+            if !app.streaming_text.is_empty() {
+                let text = std::mem::take(&mut app.streaming_text);
+                app.chat_history.push(ChatEntry::Assistant(text));
+            }
             app.chat_history
                 .push(ChatEntry::ToolCall { name, arguments });
         }
         AgentEvent::ToolCallEnd { id, output } => {
-            // Ignore internal error sentinels
-            if id == "__error__" {
-                return;
-            }
+            let _ = id;
             let output_str = match &output {
                 agent_core::ToolOutput::Text(t) => t.clone(),
                 agent_core::ToolOutput::Error(e) => format!("error: {e}"),
@@ -418,22 +503,39 @@ fn handle_agent_event(app: &mut App, event: AgentEvent) {
             });
         }
         AgentEvent::ToolCallDenied { id, name, reason } => {
-            if id == "__error__" {
-                // Propagated agent error
-                app.chat_history.push(ChatEntry::Error(reason));
-            } else {
-                app.chat_history
-                    .push(ChatEntry::Error(format!("Tool `{name}` denied: {reason}")));
-            }
+            let _ = id;
+            app.chat_history
+                .push(ChatEntry::Error(format!("Tool `{name}` denied: {reason}")));
         }
-        AgentEvent::TurnComplete { usage } => {
+        AgentEvent::SkillsUpdated { skills, warnings } => {
+            app.skills = skills;
+            app.chat_history
+                .extend(warnings.into_iter().map(ChatEntry::Activity));
+        }
+        AgentEvent::Compacted { total } => {
+            app.compaction_count = total;
+            app.chat_history
+                .push(ChatEntry::Activity(format!("context compacted ({total})")));
+        }
+        AgentEvent::Failed { error, retryable } => {
+            app.streaming_text.clear();
+            app.chat_history.push(ChatEntry::Error(error));
+            app.is_running = false;
+            app.pending_retry = retryable;
+        }
+        AgentEvent::TurnComplete {
+            usage,
+            context_window,
+        } => {
             // Flush any accumulated streaming text to the chat history.
             if !app.streaming_text.is_empty() {
                 let text = std::mem::take(&mut app.streaming_text);
                 app.chat_history.push(ChatEntry::Assistant(text));
             }
-            app.total_tokens = usage.total_tokens;
+            app.input_tokens = usage.input_tokens;
+            app.context_window = context_window;
             app.is_running = false;
+            app.pending_retry = false;
             app.scroll_offset = 0;
         }
     }
@@ -475,7 +577,7 @@ mod tests {
 
     #[test]
     fn confirmation_defaults_to_deny_and_can_be_allowed() {
-        let mut app = App::new("test-model");
+        let mut app = App::new("test-model", 100);
         let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
         app.confirmation = Some(PendingConfirmation::new(
             "shell".to_string(),
@@ -548,7 +650,7 @@ mod tests {
 
     #[test]
     fn multiline_keys_and_paste_edit_without_submitting() {
-        let mut app = App::new("test-model");
+        let mut app = App::new("test-model", 100);
 
         assert!(
             handle_input_event(
@@ -571,7 +673,7 @@ mod tests {
 
     #[test]
     fn enter_ignores_blank_draft_and_submits_non_blank_draft() {
-        let mut app = App::new("test-model");
+        let mut app = App::new("test-model", 100);
         app.input.insert_str(" \n");
         assert!(
             handle_input_event(
@@ -589,8 +691,59 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             20,
         );
-        assert_eq!(submitted.as_deref(), Some(" \nx"));
+        assert!(matches!(submitted, Some(AgentCommand::Submit(text)) if text == " \nx"));
         assert!(app.is_running);
         assert!(app.input.content().is_empty());
+    }
+
+    #[test]
+    fn dollar_picker_filters_and_inserts_selected_skill() {
+        let mut app = App::new("test-model", 100);
+        app.skills = vec![SkillInfo {
+            name: "wayfinder".into(),
+            description: "plan work".into(),
+            path: PathBuf::from("/skills/wayfinder/SKILL.md"),
+            allow_implicit_invocation: true,
+        }];
+
+        handle_input_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)),
+            20,
+        );
+        handle_input_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)),
+            20,
+        );
+        handle_input_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            20,
+        );
+
+        assert_eq!(app.input.content(), "$wayfinder ");
+        assert!(app.skill_selection.is_none());
+    }
+
+    #[test]
+    fn only_retryable_failures_enable_retry() {
+        let mut app = App::new("test-model", 100);
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Failed {
+                error: "bad skill".into(),
+                retryable: false,
+            },
+        );
+        assert!(!app.pending_retry);
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Failed {
+                error: "network".into(),
+                retryable: true,
+            },
+        );
+        assert!(app.pending_retry);
     }
 }

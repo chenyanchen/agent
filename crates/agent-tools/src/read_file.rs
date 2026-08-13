@@ -1,6 +1,17 @@
 use agent_core::{Error, RiskLevel, Tool, ToolOutput};
+use std::path::PathBuf;
 
-pub struct ReadFileTool;
+pub struct ReadFileTool {
+    workdir: PathBuf,
+}
+
+impl ReadFileTool {
+    pub fn new(workdir: impl Into<PathBuf>) -> Self {
+        Self {
+            workdir: workdir.into(),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for ReadFileTool {
@@ -32,9 +43,10 @@ impl Tool for ReadFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Tool("missing 'path' field".to_string()))?;
 
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| Error::Tool(format!("failed to read file '{path}': {e}")))?;
+        let resolved = crate::resolve(&self.workdir, path);
+        let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
+            Error::Tool(format!("failed to read file '{}': {e}", resolved.display()))
+        })?;
 
         Ok(ToolOutput::Text(content))
     }
@@ -51,7 +63,7 @@ mod tests {
         writeln!(tmp, "hello from file").unwrap();
         let path = tmp.path().to_string_lossy().to_string();
 
-        let tool = ReadFileTool;
+        let tool = ReadFileTool::new(".");
         let input = serde_json::json!({ "path": path });
         let output = tool.call(input).await.unwrap();
         assert!(output.to_string().contains("hello from file"));
@@ -59,7 +71,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_nonexistent_file() {
-        let tool = ReadFileTool;
+        let tool = ReadFileTool::new(".");
         let input = serde_json::json!({ "path": "/nonexistent/path/file.txt" });
         let err = tool.call(input).await.unwrap_err();
         assert!(matches!(err, Error::Tool(_)));
@@ -67,7 +79,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_path_field() {
-        let tool = ReadFileTool;
+        let tool = ReadFileTool::new(".");
         let input = serde_json::json!({});
         let err = tool.call(input).await.unwrap_err();
         assert!(matches!(err, Error::Tool(_)));

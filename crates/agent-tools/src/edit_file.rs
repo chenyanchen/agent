@@ -1,6 +1,17 @@
 use agent_core::{Error, RiskLevel, Tool, ToolOutput};
+use std::path::PathBuf;
 
-pub struct EditFileTool;
+pub struct EditFileTool {
+    workdir: PathBuf,
+}
+
+impl EditFileTool {
+    pub fn new(workdir: impl Into<PathBuf>) -> Self {
+        Self {
+            workdir: workdir.into(),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for EditFileTool {
@@ -44,26 +55,36 @@ impl Tool for EditFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Tool("missing 'new_string' field".to_string()))?;
 
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| Error::Tool(format!("failed to read file '{path}': {e}")))?;
+        let resolved = crate::resolve(&self.workdir, path);
+        let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
+            Error::Tool(format!("failed to read file '{}': {e}", resolved.display()))
+        })?;
 
         let count = content.matches(old_string).count();
         if count == 0 {
-            return Err(Error::Tool(format!("old_string not found in '{path}'")));
+            return Err(Error::Tool(format!(
+                "old_string not found in '{}'",
+                resolved.display()
+            )));
         }
         if count > 1 {
             return Err(Error::Tool(format!(
-                "old_string found {count} times in '{path}'; must appear exactly once"
+                "old_string found {count} times in '{}'; must appear exactly once",
+                resolved.display()
             )));
         }
 
         let new_content = content.replacen(old_string, new_string, 1);
-        tokio::fs::write(path, &new_content)
+        tokio::fs::write(&resolved, &new_content)
             .await
-            .map_err(|e| Error::Tool(format!("failed to write file '{path}': {e}")))?;
+            .map_err(|e| {
+                Error::Tool(format!(
+                    "failed to write file '{}': {e}",
+                    resolved.display()
+                ))
+            })?;
 
-        Ok(ToolOutput::Text(format!("Edited {path}")))
+        Ok(ToolOutput::Text(format!("Edited {}", resolved.display())))
     }
 }
 
@@ -78,7 +99,7 @@ mod tests {
         writeln!(tmp, "hello world").unwrap();
         let path = tmp.path().to_string_lossy().to_string();
 
-        let tool = EditFileTool;
+        let tool = EditFileTool::new(".");
         let input = serde_json::json!({
             "path": path,
             "old_string": "hello",
@@ -97,7 +118,7 @@ mod tests {
         writeln!(tmp, "hello world").unwrap();
         let path = tmp.path().to_string_lossy().to_string();
 
-        let tool = EditFileTool;
+        let tool = EditFileTool::new(".");
         let input = serde_json::json!({
             "path": path,
             "old_string": "nonexistent",
@@ -114,7 +135,7 @@ mod tests {
         write!(tmp, "foo foo foo").unwrap();
         let path = tmp.path().to_string_lossy().to_string();
 
-        let tool = EditFileTool;
+        let tool = EditFileTool::new(".");
         let input = serde_json::json!({
             "path": path,
             "old_string": "foo",

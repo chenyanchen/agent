@@ -139,6 +139,23 @@ impl InputBuffer {
         std::mem::take(&mut self.buf)
     }
 
+    pub fn dollar_query(&self) -> Option<String> {
+        let before = self.buf.chars().take(self.cursor).collect::<String>();
+        let token = before.split_whitespace().next_back()?;
+        token.strip_prefix('$').map(str::to_owned)
+    }
+
+    pub fn complete_dollar(&mut self, name: &str) {
+        let mut chars = self.buf.chars().collect::<Vec<_>>();
+        let start = chars[..self.cursor]
+            .iter()
+            .rposition(|ch| ch.is_whitespace())
+            .map_or(0, |index| index + 1);
+        chars.splice(start..self.cursor, format!("${name} ").chars());
+        self.cursor = start + name.chars().count() + 2;
+        self.buf = chars.into_iter().collect();
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// Convert a char-index to a byte offset for `self.buf`.
@@ -308,5 +325,14 @@ mod tests {
         assert!(buf.is_blank());
         buf.insert('x');
         assert!(!buf.is_blank());
+    }
+
+    #[test]
+    fn completes_current_dollar_token() {
+        let mut buf = InputBuffer::new();
+        buf.insert_str("use $way");
+        assert_eq!(buf.dollar_query().as_deref(), Some("way"));
+        buf.complete_dollar("wayfinder");
+        assert_eq!(buf.content(), "use $wayfinder ");
     }
 }

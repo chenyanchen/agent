@@ -1,8 +1,19 @@
+use std::path::PathBuf;
 use std::process::Stdio;
 
 use agent_core::{Error, RiskLevel, Tool, ToolOutput};
 
-pub struct ShellTool;
+pub struct ShellTool {
+    workdir: PathBuf,
+}
+
+impl ShellTool {
+    pub fn new(workdir: impl Into<PathBuf>) -> Self {
+        Self {
+            workdir: workdir.into(),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for ShellTool {
@@ -38,6 +49,7 @@ impl Tool for ShellTool {
             .arg("-c")
             .arg(command)
             .stdin(Stdio::null())
+            .current_dir(&self.workdir)
             .env("GIT_EDITOR", "true")
             .output()
             .await
@@ -66,7 +78,7 @@ mod tests {
 
     #[tokio::test]
     async fn echo_hello() {
-        let tool = ShellTool;
+        let tool = ShellTool::new(".");
         let input = serde_json::json!({ "command": "echo hello" });
         let output = tool.call(input).await.unwrap();
         assert!(output.to_string().contains("hello"));
@@ -74,7 +86,7 @@ mod tests {
 
     #[tokio::test]
     async fn false_command_exit_code() {
-        let tool = ShellTool;
+        let tool = ShellTool::new(".");
         let input = serde_json::json!({ "command": "false" });
         let output = tool.call(input).await.unwrap();
         assert!(output.to_string().contains("exit code"));
@@ -89,7 +101,7 @@ mod tests {
         );
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            ShellTool.call(serde_json::json!({ "command": command })),
+            ShellTool::new(".").call(serde_json::json!({ "command": command })),
         )
         .await
         .expect("git must not wait for an interactive editor")
@@ -100,7 +112,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_command_field() {
-        let tool = ShellTool;
+        let tool = ShellTool::new(".");
         let input = serde_json::json!({});
         let err = tool.call(input).await.unwrap_err();
         assert!(matches!(err, Error::Tool(_)));

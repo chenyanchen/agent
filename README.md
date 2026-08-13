@@ -1,9 +1,8 @@
 # agent
 
-A general-purpose LLM agent framework written in Rust. Ships a streaming
-tool-call runtime as a library, six built-in tools, and a production-grade
-TUI CLI that works with any OpenAI-compatible API — OpenAI, DeepSeek,
-Ollama, LM Studio, and others.
+A general-purpose learning agent written in Rust. It ships a streaming
+Responses runtime, six workdir-bound tools, local project instructions and
+skills, durable sessions, and a TUI CLI.
 
 ## Architecture
 
@@ -36,40 +35,33 @@ cargo build --release --workspace
 Create `~/.agent/config.toml`:
 
 ```toml
+# Optional custom system prompt
+# system_prompt = "You are a helpful assistant."
+
 [model]
 model_id = "gpt-4o"
+context_window = 128000 # Required; use the selected model's documented value
 api_key  = "sk-..."
-# Optional: point at any OpenAI-compatible endpoint
-# api_base = "https://api.deepseek.com/v1"
+# Optional OpenAI Responses-compatible endpoint
+# api_base = "https://api.openai.com/v1"
 
 [guard]
 mode = "confirm"   # default; medium/high-risk tools require confirmation
-
-# Optional custom system prompt
-# system_prompt = "You are a helpful assistant."
 ```
 
 CLI flags override the config file:
 
 ```sh
-agent --model deepseek-chat --api-base https://api.deepseek.com/v1
+agent --model gpt-4o
 agent --auto
 ```
 
 If `api_key` is not set in the config, the `OPENAI_API_KEY` environment
 variable is used as a fallback.
 
-### Supported providers
-
-Any OpenAI-compatible Chat Completions API with streaming. Tested against
-OpenAI and DeepSeek. Typical `api_base` values:
-
-| Provider  | `api_base`                         |
-| --------- | ---------------------------------- |
-| OpenAI    | `https://api.openai.com/v1` (default) |
-| DeepSeek  | `https://api.deepseek.com/v1`      |
-| Ollama    | `http://localhost:11434/v1`        |
-| LM Studio | `http://localhost:1234/v1`         |
+Agent uses only the Responses API with `store=false` and official server-side
+compaction at 80% of `context_window`. The configured endpoint must implement
+that contract; there is no Chat Completions fallback.
 
 ## Usage
 
@@ -77,6 +69,11 @@ Run `agent` to start the TUI. Type a message and press `Enter`.
 The default conversation is saved under `~/.agent/sessions/default.json` and
 resumed on the next run. Use `agent --session <name>` to create or resume a
 different conversation. Run `agent sessions` to list saved session names.
+
+The launch directory is the workdir. Agent loads only its `AGENTS.md` at
+startup, anchors all relative tool paths there, and discovers repository plus
+`~/.agents/skills` skills before each user turn. Type `$` to search skills or
+write `$skill-name` directly.
 
 ### Keybindings
 
@@ -88,6 +85,8 @@ different conversation. Run `agent sessions` to list saved session names.
 | `Backspace`            | Delete character                            |
 | `←` / `→` / `↑` / `↓`  | Move the input cursor                       |
 | `PageUp` / `PageDown`  | Scroll chat history                         |
+| `$`                    | Open the searchable skill picker            |
+| `Ctrl+R`               | Retry the exact failed Responses request    |
 | `Ctrl+C`               | Quit                                        |
 
 The input grows to one third of the terminal, then scrolls with the cursor.
@@ -119,9 +118,13 @@ let mut agent = Agent::builder()
     .model(model)
     .guard(AutoGuard)
     .storage(MemoryStorage::new())
-    .tool(ShellTool)
-    .tool(ReadFileTool)
-    .build();
+    .workdir("/path/to/project")
+    .user_skills_dir("/home/me/.agents/skills")
+    .context_window(128_000)
+    .tool(ShellTool::new("/path/to/project"))
+    .tool(ReadFileTool::new("/path/to/project"))
+    .build()
+    .await?;
 
 agent.run("List files in /tmp", &my_handler).await?;
 ```

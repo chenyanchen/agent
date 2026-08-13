@@ -1,28 +1,9 @@
-use std::collections::HashMap;
-
-use async_openai::{
-    Client,
-    config::OpenAIConfig,
-    types::{
-        ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessage,
-        ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
-        ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
-        ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-        ChatCompletionStreamOptions, ChatCompletionTool, ChatCompletionToolType,
-        CreateChatCompletionRequest, FinishReason, FunctionCall, FunctionObject,
-    },
-};
+use async_openai::Client;
+use async_openai::config::OpenAIConfig;
+use async_openai::types::stream::StreamResponse as OpenAIStream;
 use futures::StreamExt;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::{
-    error::Error,
-    event::{Event, StreamResponse, Usage},
-    message::Message,
-    model::{Model, Request, ToolDefinition},
-};
+use crate::{Error, Event, Model, Request, StreamResponse, Usage};
 
 pub struct OpenAIModel {
     client: Client<OpenAIConfig>,
@@ -30,7 +11,6 @@ pub struct OpenAIModel {
 }
 
 impl OpenAIModel {
-    /// Create a new `OpenAIModel` that reads `OPENAI_API_KEY` from the environment.
     pub fn new(model_id: impl Into<String>) -> Self {
         Self {
             client: Client::new(),
@@ -38,8 +18,18 @@ impl OpenAIModel {
         }
     }
 
-    /// Create a new `OpenAIModel` with a custom [`OpenAIConfig`] (e.g. custom base URL).
-    pub fn with_config(model_id: impl Into<String>, config: OpenAIConfig) -> Self {
+    pub fn with_settings(
+        model_id: impl Into<String>,
+        api_key: Option<String>,
+        api_base: Option<String>,
+    ) -> Self {
+        let mut config = OpenAIConfig::new();
+        if let Some(api_key) = api_key {
+            config = config.with_api_key(api_key);
+        }
+        if let Some(api_base) = api_base {
+            config = config.with_api_base(api_base);
+        }
         Self {
             client: Client::with_config(config),
             model_id: model_id.into(),
@@ -47,247 +37,151 @@ impl OpenAIModel {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Conversion helpers
-// ---------------------------------------------------------------------------
-
-fn convert_message(msg: Message) -> ChatCompletionRequestMessage {
-    match msg {
-        Message::System { content } => {
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(content),
-                name: None,
+fn request_body(model_id: &str, request: Request) -> serde_json::Value {
+    let tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "strict": false
             })
-        }
-        Message::User { content } => {
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(content),
-                name: None,
-            })
-        }
-        Message::Assistant { text, tool_calls } => {
-            let content = text.map(ChatCompletionRequestAssistantMessageContent::Text);
-
-            let oai_tool_calls: Option<Vec<ChatCompletionMessageToolCall>> =
-                if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(
-                        tool_calls
-                            .into_iter()
-                            .map(|tc| ChatCompletionMessageToolCall {
-                                id: tc.id,
-                                r#type: ChatCompletionToolType::Function,
-                                function: FunctionCall {
-                                    name: tc.name,
-                                    arguments: tc.arguments,
-                                },
-                            })
-                            .collect(),
-                    )
-                };
-
-            #[allow(deprecated)]
-            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                content,
-                refusal: None,
-                name: None,
-                audio: None,
-                tool_calls: oai_tool_calls,
-                function_call: None,
-            })
-        }
-        Message::Tool {
-            tool_call_id,
-            content,
-        } => ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
-            content: ChatCompletionRequestToolMessageContent::Text(content),
-            tool_call_id,
-        }),
-    }
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "model": model_id,
+        "input": request.input,
+        "instructions": request.instructions,
+        "tools": tools,
+        "store": false,
+        "stream": true,
+        "include": ["reasoning.encrypted_content"],
+        "context_management": [{
+            "type": "compaction",
+            "compact_threshold": request.compact_threshold
+        }]
+    })
 }
 
-fn convert_tool(tool: ToolDefinition) -> ChatCompletionTool {
-    ChatCompletionTool {
-        r#type: ChatCompletionToolType::Function,
-        function: FunctionObject {
-            name: tool.name,
-            description: Some(tool.description),
-            parameters: Some(tool.parameters),
-            strict: None,
-        },
+fn parse_stream_event(event: serde_json::Value) -> Option<Result<Event, Error>> {
+    let event_type = event["type"].as_str()?;
+    match event_type {
+        "response.output_text.delta" => Some(
+            event["delta"]
+                .as_str()
+                .map(|delta| Event::TextDelta(delta.to_owned()))
+                .ok_or_else(|| Error::Model("response.output_text.delta missing delta".into())),
+        ),
+        "response.output_item.done" => Some(
+            event
+                .get("item")
+                .cloned()
+                .map(Event::OutputItem)
+                .ok_or_else(|| Error::Model("response.output_item.done missing item".into())),
+        ),
+        "response.completed" => {
+            let usage = &event["response"]["usage"];
+            let token = |name: &str| {
+                usage[name]
+                    .as_u64()
+                    .unwrap_or_default()
+                    .min(u32::MAX.into()) as u32
+            };
+            Some(Ok(Event::Done {
+                usage: Usage {
+                    input_tokens: token("input_tokens"),
+                    output_tokens: token("output_tokens"),
+                    total_tokens: token("total_tokens"),
+                },
+            }))
+        }
+        "response.failed" | "response.incomplete" | "error" => Some(Err(Error::Model(
+            event
+                .pointer("/response/error/message")
+                .or_else(|| event.pointer("/error/message"))
+                .or_else(|| event.pointer("/response/incomplete_details/reason"))
+                .or_else(|| event.pointer("/message"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| event_type.to_owned()),
+        ))),
+        _ => None,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Model trait implementation
-// ---------------------------------------------------------------------------
 
 #[async_trait::async_trait]
 impl Model for OpenAIModel {
     async fn stream(&self, request: Request) -> Result<StreamResponse, Error> {
-        // Build the list of messages, prepending system if present.
-        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-
-        if let Some(system) = request.system {
-            messages.push(ChatCompletionRequestMessage::System(
-                ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(system),
-                    name: None,
-                },
-            ));
-        }
-
-        for msg in request.messages {
-            messages.push(convert_message(msg));
-        }
-
-        let tools: Option<Vec<ChatCompletionTool>> = if request.tools.is_empty() {
-            None
-        } else {
-            Some(request.tools.into_iter().map(convert_tool).collect())
-        };
-
-        #[allow(deprecated)]
-        let oai_request = CreateChatCompletionRequest {
-            model: self.model_id.clone(),
-            messages,
-            temperature: request.temperature,
-            max_completion_tokens: request.max_tokens,
-            tools,
-            stream_options: Some(ChatCompletionStreamOptions {
-                include_usage: true,
-            }),
-            // All other fields — use their defaults (None / false).
-            store: None,
-            reasoning_effort: None,
-            metadata: None,
-            frequency_penalty: None,
-            logit_bias: None,
-            logprobs: None,
-            top_logprobs: None,
-            max_tokens: None,
-            n: None,
-            modalities: None,
-            prediction: None,
-            audio: None,
-            presence_penalty: None,
-            response_format: None,
-            seed: None,
-            service_tier: None,
-            stop: None,
-            stream: None,
-            top_p: None,
-            tool_choice: None,
-            parallel_tool_calls: None,
-            user: None,
-            function_call: None,
-            functions: None,
-        };
-
-        let mut oai_stream = self
+        let body = request_body(&self.model_id, request);
+        let stream: OpenAIStream<serde_json::Value> = self
             .client
-            .chat()
-            .create_stream(oai_request)
+            .responses()
+            .create_stream_byot(body)
             .await
-            .map_err(|e| Error::Model(e.to_string()))?;
+            .map_err(|error| Error::Model(error.to_string()))?;
 
-        let (tx, rx) = mpsc::unbounded_channel::<Event>();
+        let events = stream.filter_map(|result| async move {
+            match result {
+                Err(error) => Some(Err(Error::Model(error.to_string()))),
+                Ok(event) => parse_stream_event(event),
+            }
+        });
+        Ok(StreamResponse::new(events))
+    }
+}
 
-        tokio::spawn(async move {
-            // index → (id, name, accumulated_arguments)
-            let mut pending: HashMap<u32, (String, String, String)> = HashMap::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            while let Some(result) = oai_stream.next().await {
-                match result {
-                    Err(e) => {
-                        // We can't propagate errors through the channel elegantly;
-                        // log and break so the stream ends.
-                        eprintln!("OpenAI stream error: {e}");
-                        break;
-                    }
-                    Ok(chunk) => {
-                        // The last chunk (when include_usage=true) may have an empty
-                        // choices array and carry usage information.
-                        if let Some(usage) = chunk.usage {
-                            let _ = tx.send(Event::Done {
-                                usage: Usage {
-                                    prompt_tokens: usage.prompt_tokens,
-                                    completion_tokens: usage.completion_tokens,
-                                    total_tokens: usage.total_tokens,
-                                },
-                            });
-                        }
+    #[test]
+    fn request_body_uses_responses_compaction_contract() {
+        let request = Request {
+            instructions: "rules".into(),
+            input: vec![serde_json::json!({"role":"user","content":"hi"})],
+            tools: vec![],
+            compact_threshold: 80,
+        };
+        let body = request_body("test", request);
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert!(body.get("truncation").is_none());
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+        assert_eq!(body["context_management"][0]["compact_threshold"], 80);
+        assert!(body.get("previous_response_id").is_none());
+    }
 
-                        for choice in chunk.choices {
-                            let delta = choice.delta;
-
-                            // Text delta
-                            if let Some(content) = delta.content
-                                && !content.is_empty()
-                            {
-                                let _ = tx.send(Event::TextDelta(content));
-                            }
-
-                            // Tool call chunks
-                            if let Some(tc_chunks) = delta.tool_calls {
-                                for tc_chunk in tc_chunks {
-                                    let index = tc_chunk.index;
-
-                                    if let Some(id) = tc_chunk.id {
-                                        // First chunk for this index — extract name too.
-                                        let name = tc_chunk
-                                            .function
-                                            .as_ref()
-                                            .and_then(|f| f.name.clone())
-                                            .unwrap_or_default();
-
-                                        pending.insert(
-                                            index,
-                                            (id.clone(), name.clone(), String::new()),
-                                        );
-                                        let _ = tx.send(Event::ToolCallBegin { id, name });
-                                    } else if let Some(func) = tc_chunk.function {
-                                        // Subsequent chunk — arguments delta.
-                                        if let Some(args_delta) = func.arguments
-                                            && let Some((id, _, accumulated)) =
-                                                pending.get_mut(&index)
-                                        {
-                                            accumulated.push_str(&args_delta);
-                                            let _ = tx.send(Event::ToolCallDelta {
-                                                id: id.clone(),
-                                                arguments_delta: args_delta,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-
-                            // When finish_reason is ToolCalls, emit ToolCallEnd for all pending.
-                            if let Some(FinishReason::ToolCalls) = choice.finish_reason {
-                                let mut indices: Vec<u32> = pending.keys().copied().collect();
-                                indices.sort_unstable();
-                                for idx in indices {
-                                    if let Some((id, _, _)) = pending.remove(&idx) {
-                                        let _ = tx.send(Event::ToolCallEnd { id });
-                                    }
-                                }
-                            }
-                        }
-                    }
+    #[test]
+    fn completed_event_only_requires_fields_the_agent_uses() {
+        let event = serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}]
+                }],
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 2,
+                    "total_tokens": 13
                 }
             }
-
-            // If there was no usage chunk (e.g. stream ended without include_usage),
-            // send a Done with zeroed usage so the stream always terminates cleanly.
-            // We detect this by checking whether Done was already sent via usage above;
-            // since we can't easily track that, we send it unconditionally only when
-            // include_usage is true and the last chunk carries it — which is handled above.
-            // Drop tx so the receiver sees EOF.
-            drop(tx);
         });
 
-        let stream = UnboundedReceiverStream::new(rx);
-        Ok(StreamResponse::new(stream))
+        let parsed = parse_stream_event(event).unwrap().unwrap();
+        assert!(matches!(
+            parsed,
+            Event::Done {
+                usage: Usage {
+                    input_tokens: 11,
+                    output_tokens: 2,
+                    total_tokens: 13
+                }
+            }
+        ));
     }
 }

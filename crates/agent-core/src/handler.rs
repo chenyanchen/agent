@@ -1,4 +1,5 @@
 use crate::event::Usage;
+use crate::skills::SkillInfo;
 use crate::tool::ToolOutput;
 
 #[derive(Debug, Clone)]
@@ -18,8 +19,20 @@ pub enum AgentEvent {
         name: String,
         reason: String,
     },
+    SkillsUpdated {
+        skills: Vec<SkillInfo>,
+        warnings: Vec<String>,
+    },
+    Compacted {
+        total: u64,
+    },
+    Failed {
+        error: String,
+        retryable: bool,
+    },
     TurnComplete {
         usage: Usage,
+        context_window: u32,
     },
 }
 
