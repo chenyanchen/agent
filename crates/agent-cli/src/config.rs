@@ -1,6 +1,43 @@
+use std::fmt;
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 use agent_core::{ConfirmGuard, Decision, Guard, RiskLevel};
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read { path, source } => {
+                write!(formatter, "failed to read {}: {source}", path.display())
+            }
+            Self::Parse { path, source } => {
+                write!(formatter, "failed to parse {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+        }
+    }
+}
 
 // ── Top-level Config ──────────────────────────────────────────────────────────
 
@@ -16,16 +53,32 @@ pub struct Config {
 
 impl Config {
     /// Load config from `~/.agent/config.toml`.
-    /// If the file is missing or unreadable, returns the default config silently.
-    pub fn load() -> Self {
+    /// A missing file uses defaults; unreadable or invalid files return an error.
+    pub fn load() -> Result<Self, ConfigError> {
         let Some(home) = dirs::home_dir() else {
-            return Self::default();
+            return Ok(Self::default());
         };
-        let path = home.join(".agent").join("config.toml");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return Self::default();
+        Self::load_from(home.join(".agent").join("config.toml"))
+    }
+
+    fn load_from(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
         };
-        toml::from_str(&content).unwrap_or_default()
+        toml::from_str(&content).map_err(|source| ConfigError::Parse {
+            path: path.to_owned(),
+            source,
+        })
     }
 }
 
@@ -159,5 +212,25 @@ model_id = "gpt-3.5-turbo"
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.model.model_id, "gpt-4o");
         assert_eq!(cfg.guard.mode, GuardMode::Confirm);
+    }
+
+    #[test]
+    fn missing_config_uses_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let cfg = Config::load_from(directory.path().join("missing.toml")).unwrap();
+        assert_eq!(cfg.model.model_id, "gpt-4o");
+    }
+
+    #[test]
+    fn invalid_config_reports_path_and_location() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "[guard]\nmode = 123\n").unwrap();
+
+        let error = Config::load_from(&path).unwrap_err().to_string();
+
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains("line 2"));
+        assert!(error.contains("mode"));
     }
 }

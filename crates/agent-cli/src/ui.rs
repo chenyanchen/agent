@@ -1,9 +1,9 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Offset},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Shadow},
 };
 
 use crate::{app::App, markdown};
@@ -186,6 +186,14 @@ fn draw_status(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     frame.render_widget(status_bar, area);
 }
 
+fn popup_block(title: impl Into<Line<'static>>) -> Block<'static> {
+    Block::default().title(title).borders(Borders::ALL).shadow(
+        Shadow::dark_shade()
+            .style(Style::default().fg(Color::DarkGray))
+            .offset(Offset::new(1, -1)),
+    )
+}
+
 fn draw_skill_picker(frame: &mut Frame, app: &App, input_area: ratatui::layout::Rect) {
     let Some(selected) = app.skill_selection else {
         return;
@@ -224,10 +232,7 @@ fn draw_skill_picker(frame: &mut Frame, app: &App, input_area: ratatui::layout::
             .collect()
     };
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().title(" Skills ").borders(Borders::ALL)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(lines).block(popup_block(" Skills ")), area);
 }
 
 // ── Input area ────────────────────────────────────────────────────────────────
@@ -247,14 +252,10 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             choice(confirmation.allow_selected, "Allow this tool call"),
             choice(!confirmation.allow_selected, "Deny this tool call"),
         ];
-        let widget = Paragraph::new(lines).block(
-            Block::default()
-                .title(format!(
-                    " {}({}) ",
-                    confirmation.name, confirmation.arguments
-                ))
-                .borders(Borders::ALL),
-        );
+        let widget = Paragraph::new(lines).block(popup_block(format!(
+            " {}({}) ",
+            confirmation.name, confirmation.arguments
+        )));
         frame.render_widget(widget, area);
         return;
     }
