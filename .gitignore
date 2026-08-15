@@ -14,3 +14,6 @@ debug/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local observability credentials
+/dev/observability/.env

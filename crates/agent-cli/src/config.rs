@@ -49,6 +49,8 @@ pub struct Config {
     pub guard: GuardConfig,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
 }
 
 impl Config {
@@ -104,6 +106,33 @@ impl Default for ModelConfig {
             api_key: None,
             api_base: None,
             context_window: None,
+        }
+    }
+}
+
+// ── ObservabilityConfig ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservabilityConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_langfuse_endpoint")]
+    pub endpoint: String,
+    pub public_key: Option<String>,
+    pub secret_key: Option<String>,
+}
+
+fn default_langfuse_endpoint() -> String {
+    "http://localhost:3000/api/public/otel/v1/traces".into()
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_langfuse_endpoint(),
+            public_key: None,
+            secret_key: None,
         }
     }
 }
@@ -167,6 +196,11 @@ mod tests {
         assert!(cfg.model.context_window.is_none());
         assert_eq!(cfg.guard.mode, GuardMode::Confirm);
         assert!(cfg.system_prompt.is_none());
+        assert!(!cfg.observability.enabled);
+        assert_eq!(
+            cfg.observability.endpoint,
+            "http://localhost:3000/api/public/otel/v1/traces"
+        );
     }
 
     #[test]
@@ -182,6 +216,12 @@ context_window = 128000
 
 [guard]
 mode = "auto"
+
+[observability]
+enabled = true
+endpoint = "http://localhost:3000/api/public/otel/v1/traces"
+public_key = "pk-local"
+secret_key = "sk-local"
 "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.model.model_id, "gpt-4-turbo");
@@ -193,6 +233,9 @@ mode = "auto"
             cfg.system_prompt.as_deref(),
             Some("You are a helpful assistant.")
         );
+        assert!(cfg.observability.enabled);
+        assert_eq!(cfg.observability.public_key.as_deref(), Some("pk-local"));
+        assert_eq!(cfg.observability.secret_key.as_deref(), Some("sk-local"));
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use futures::StreamExt;
+use tracing::{Instrument, field};
 
 use crate::event::{Event, Usage};
 use crate::guard::{Decision, Guard};
@@ -67,6 +68,34 @@ where
     }
 
     pub async fn run(&mut self, user_input: &str, handler: &dyn Handler) -> Result<(), Error> {
+        let input = json_string(&serde_json::json!({"user_input": user_input}));
+        let span = tracing::info_span!(
+            "agent.run",
+            "langfuse.trace.name" = "agent.run",
+            "langfuse.session.id" = %self.conversation_id,
+            "langfuse.environment" = "development",
+            "langfuse.observation.type" = "span",
+            "langfuse.observation.input" = %input,
+            "langfuse.observation.output" = field::Empty,
+            "langfuse.observation.level" = field::Empty,
+            "langfuse.observation.status_message" = field::Empty,
+            "otel.status_code" = field::Empty,
+            "otel.status_message" = field::Empty,
+            "langfuse.observation.metadata.workdir" = %self.workdir.display(),
+        );
+        let result = self
+            .run_inner(user_input, handler)
+            .instrument(span.clone())
+            .await;
+        record_result(&span, &result);
+        result.map(|_| ())
+    }
+
+    async fn run_inner(
+        &mut self,
+        user_input: &str,
+        handler: &dyn Handler,
+    ) -> Result<String, Error> {
         if self.state.pending_request.is_some() {
             let error = Error::Other(
                 "a failed request is pending; retry it before submitting a new message".into(),
@@ -80,7 +109,33 @@ where
             return Err(error);
         }
 
-        self.skills = SkillCatalog::scan(&self.workdir, &self.user_skills_dir, self.context_window);
+        let skills_span = tracing::info_span!(
+            "skills.discover",
+            "langfuse.observation.type" = "span",
+            "langfuse.observation.input" = field::Empty,
+            "langfuse.observation.output" = field::Empty,
+        );
+        let skills_input = json_string(&serde_json::json!({
+            "workdir": self.workdir,
+            "user_skills_dir": self.user_skills_dir,
+        }));
+        skills_span.record("langfuse.observation.input", skills_input.as_str());
+        self.skills = skills_span.in_scope(|| {
+            SkillCatalog::scan(&self.workdir, &self.user_skills_dir, self.context_window)
+        });
+        let skills_output = json_string(&serde_json::json!({
+            "available_skills": self.skills.skills.iter().map(|skill| serde_json::json!({
+                "name": skill.name,
+                "description": skill.description,
+                "path": skill.path,
+                "allow_implicit_invocation": skill.allow_implicit_invocation,
+            })).collect::<Vec<_>>(),
+            "injected_prompt": self.skills.prompt(),
+            "warnings": self.skills.warnings,
+        }));
+        skills_span.record("langfuse.observation.output", skills_output.as_str());
+        drop(skills_span);
+
         handler
             .on_event(AgentEvent::SkillsUpdated {
                 skills: self.skills.skills.clone(),
@@ -102,10 +157,30 @@ where
     }
 
     pub async fn retry(&mut self, handler: &dyn Handler) -> Result<(), Error> {
-        if self.state.pending_request.is_none() {
-            return Err(Error::Other("there is no pending request to retry".into()));
+        let input = json_string(&self.state.pending_request);
+        let span = tracing::info_span!(
+            "agent.retry",
+            "langfuse.trace.name" = "agent.retry",
+            "langfuse.session.id" = %self.conversation_id,
+            "langfuse.environment" = "development",
+            "langfuse.observation.type" = "span",
+            "langfuse.observation.input" = %input,
+            "langfuse.observation.output" = field::Empty,
+            "langfuse.observation.level" = field::Empty,
+            "langfuse.observation.status_message" = field::Empty,
+            "otel.status_code" = field::Empty,
+            "otel.status_message" = field::Empty,
+        );
+        let result = async {
+            if self.state.pending_request.is_none() {
+                return Err(Error::Other("there is no pending request to retry".into()));
+            }
+            self.execute_pending(handler).await
         }
-        self.execute_pending(handler).await
+        .instrument(span.clone())
+        .await;
+        record_result(&span, &result);
+        result.map(|_| ())
     }
 
     async fn set_pending(&mut self, input: Vec<serde_json::Value>) -> Result<(), Error> {
@@ -119,7 +194,7 @@ where
         self.save().await
     }
 
-    async fn execute_pending(&mut self, handler: &dyn Handler) -> Result<(), Error> {
+    async fn execute_pending(&mut self, handler: &dyn Handler) -> Result<String, Error> {
         loop {
             let request = self
                 .state
@@ -146,6 +221,8 @@ where
                 .iter()
                 .filter(|item| item["type"] == "compaction")
                 .count() as u64;
+            let context_before = (compacted > 0).then(|| json_string(&request.input));
+            let context_items_before = request.input.len();
             self.state.context = request.input;
             self.state.context.extend(output.clone());
             if let Some(index) = self
@@ -161,9 +238,25 @@ where
             self.state.pending_request = None;
             self.state.last_error = None;
 
+            if compacted > 0 {
+                let before = context_before.unwrap_or_default();
+                let after = json_string(&self.state.context);
+                let compaction_span = tracing::info_span!(
+                    "context.compact",
+                    "langfuse.observation.type" = "span",
+                    "langfuse.observation.input" = %before,
+                    "langfuse.observation.output" = %after,
+                    "langfuse.observation.metadata.compactionItems" = compacted,
+                    "langfuse.observation.metadata.contextItemsBefore" = context_items_before as u64,
+                    "langfuse.observation.metadata.contextItemsAfter" = self.state.context.len() as u64,
+                    "langfuse.observation.metadata.inputTokens" = usage.input_tokens as u64,
+                );
+                compaction_span.in_scope(|| {});
+            }
+
             let tool_calls = function_calls(&output);
             self.state.transcript.push(Message::Assistant {
-                text: (!text.is_empty()).then_some(text),
+                text: (!text.is_empty()).then_some(text.clone()),
                 tool_calls: tool_calls.clone(),
             });
             self.save().await?;
@@ -182,7 +275,7 @@ where
                         context_window: self.context_window,
                     })
                     .await;
-                return Ok(());
+                return Ok(text);
             }
 
             self.execute_tools(&tool_calls, handler).await;
@@ -196,23 +289,72 @@ where
         request: Request,
         handler: &dyn Handler,
     ) -> Result<(String, Vec<serde_json::Value>, Usage), Error> {
-        let mut stream = self.model.stream(request).await?;
-        let mut text = String::new();
-        let mut output = Vec::new();
-        let mut usage = None;
-        while let Some(event) = stream.next().await {
-            match event? {
-                Event::TextDelta(delta) => {
-                    text.push_str(&delta);
-                    handler.on_event(AgentEvent::TextDelta(delta)).await;
+        let observed_input = json_string(&serde_json::json!({
+            "instructions": request.instructions,
+            "input": request.input,
+            "tools": request.tools,
+            "compact_threshold": request.compact_threshold,
+        }));
+        let model = self.model.model_name().unwrap_or("unknown");
+        let span = tracing::info_span!(
+            "llm.call",
+            "langfuse.observation.type" = "generation",
+            "langfuse.observation.input" = %observed_input,
+            "langfuse.observation.output" = field::Empty,
+            "langfuse.observation.model.name" = %model,
+            "langfuse.observation.usage_details" = field::Empty,
+            "langfuse.observation.level" = field::Empty,
+            "langfuse.observation.status_message" = field::Empty,
+            "otel.status_code" = field::Empty,
+            "otel.status_message" = field::Empty,
+            "gen_ai.operation.name" = "chat",
+            "gen_ai.request.model" = %model,
+            "gen_ai.usage.input_tokens" = field::Empty,
+            "gen_ai.usage.output_tokens" = field::Empty,
+        );
+        let result = async {
+            let mut stream = self.model.stream(request).await?;
+            let mut text = String::new();
+            let mut output = Vec::new();
+            let mut usage = None;
+            while let Some(event) = stream.next().await {
+                match event? {
+                    Event::TextDelta(delta) => {
+                        text.push_str(&delta);
+                        handler.on_event(AgentEvent::TextDelta(delta)).await;
+                    }
+                    Event::OutputItem(item) => output.push(item),
+                    Event::Done { usage: value } => usage = Some(value),
                 }
-                Event::OutputItem(item) => output.push(item),
-                Event::Done { usage: value } => usage = Some(value),
             }
+            let usage = usage
+                .ok_or_else(|| Error::Model("response stream ended before completion".into()))?;
+            Ok((text, output, usage))
         }
-        let usage =
-            usage.ok_or_else(|| Error::Model("response stream ended before completion".into()))?;
-        Ok((text, output, usage))
+        .instrument(span.clone())
+        .await;
+
+        match &result {
+            Ok((text, output, usage)) => {
+                let observed_output = json_string(&serde_json::json!({
+                    "text": text,
+                    "items": output,
+                }));
+                let uncached_input = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+                let usage_details = json_string(&serde_json::json!({
+                    "input": uncached_input,
+                    "output": usage.output_tokens,
+                    "total": usage.total_tokens,
+                    "cached_tokens": usage.cached_input_tokens,
+                }));
+                span.record("langfuse.observation.output", observed_output.as_str());
+                span.record("langfuse.observation.usage_details", usage_details.as_str());
+                span.record("gen_ai.usage.input_tokens", usage.input_tokens as u64);
+                span.record("gen_ai.usage.output_tokens", usage.output_tokens as u64);
+            }
+            Err(error) => record_error(&span, error),
+        }
+        result
     }
 
     async fn execute_tools(&mut self, calls: &[ToolCall], handler: &dyn Handler) {
@@ -225,38 +367,73 @@ where
                 })
                 .await;
 
-            let input = serde_json::from_str(&call.arguments);
-            let output = match (self.tools.get(&call.name), input) {
-                (_, Err(error)) => ToolOutput::Error(format!("invalid arguments JSON: {error}")),
-                (None, _) => ToolOutput::Error(format!("unknown tool: {}", call.name)),
-                (Some(tool), Ok(input)) => {
-                    let decision = self
-                        .guard
-                        .check(&call.name, tool.risk_level(), &input)
-                        .await;
-                    let denial = match decision {
-                        Decision::Deny(reason) => Some(reason),
-                        Decision::NeedConfirm if !handler.confirm(&call.name, &input).await => {
-                            Some("user denied confirmation".into())
-                        }
-                        Decision::NeedConfirm | Decision::Allow => None,
-                    };
-                    if let Some(reason) = denial {
-                        handler
-                            .on_event(AgentEvent::ToolCallDenied {
-                                id: call.id.clone(),
-                                name: call.name.clone(),
-                                reason: reason.clone(),
-                            })
+            let observed_input = json_string(&serde_json::json!({
+                "id": call.id,
+                "name": call.name,
+                "arguments": call.arguments,
+            }));
+            let span = tracing::info_span!(
+                "tool.execute",
+                "langfuse.observation.type" = "span",
+                "langfuse.observation.input" = %observed_input,
+                "langfuse.observation.output" = field::Empty,
+                "langfuse.observation.level" = field::Empty,
+                "langfuse.observation.status_message" = field::Empty,
+                "otel.status_code" = field::Empty,
+                "otel.status_message" = field::Empty,
+                "langfuse.observation.metadata.toolName" = %call.name,
+                "gen_ai.tool.call.id" = %call.id,
+                "gen_ai.tool.call.name" = %call.name,
+                "gen_ai.tool.call.arguments" = %call.arguments,
+                "gen_ai.tool.call.result" = field::Empty,
+            );
+            let output = async {
+                let input = serde_json::from_str(&call.arguments);
+                match (self.tools.get(&call.name), input) {
+                    (_, Err(error)) => {
+                        ToolOutput::Error(format!("invalid arguments JSON: {error}"))
+                    }
+                    (None, _) => ToolOutput::Error(format!("unknown tool: {}", call.name)),
+                    (Some(tool), Ok(input)) => {
+                        let decision = self
+                            .guard
+                            .check(&call.name, tool.risk_level(), &input)
                             .await;
-                        ToolOutput::Error(format!("denied: {reason}"))
-                    } else {
-                        tool.call(input)
-                            .await
-                            .unwrap_or_else(|error| ToolOutput::Error(error.to_string()))
+                        let denial = match decision {
+                            Decision::Deny(reason) => Some(reason),
+                            Decision::NeedConfirm if !handler.confirm(&call.name, &input).await => {
+                                Some("user denied confirmation".into())
+                            }
+                            Decision::NeedConfirm | Decision::Allow => None,
+                        };
+                        if let Some(reason) = denial {
+                            handler
+                                .on_event(AgentEvent::ToolCallDenied {
+                                    id: call.id.clone(),
+                                    name: call.name.clone(),
+                                    reason: reason.clone(),
+                                })
+                                .await;
+                            ToolOutput::Error(format!("denied: {reason}"))
+                        } else {
+                            tool.call(input)
+                                .await
+                                .unwrap_or_else(|error| ToolOutput::Error(error.to_string()))
+                        }
                     }
                 }
-            };
+            }
+            .instrument(span.clone())
+            .await;
+            let observed_output = json_string(&serde_json::json!({
+                "result": output.to_string(),
+                "is_error": matches!(&output, ToolOutput::Error(_)),
+            }));
+            span.record("langfuse.observation.output", observed_output.as_str());
+            span.record("gen_ai.tool.call.result", output.to_string().as_str());
+            if let ToolOutput::Error(error) = &output {
+                record_error_message(&span, error);
+            }
 
             handler
                 .on_event(AgentEvent::ToolCallEnd {
@@ -299,6 +476,33 @@ where
     async fn save(&self) -> Result<(), Error> {
         self.storage.save(&self.conversation_id, &self.state).await
     }
+}
+
+fn json_string(value: &impl serde::Serialize) -> String {
+    serde_json::to_string(value).unwrap_or_else(|error| {
+        serde_json::json!({"serialization_error": error.to_string()}).to_string()
+    })
+}
+
+fn record_result(span: &tracing::Span, result: &Result<String, Error>) {
+    match result {
+        Ok(output) => {
+            let output = json_string(&serde_json::json!({"text": output}));
+            span.record("langfuse.observation.output", output.as_str());
+        }
+        Err(error) => record_error(span, error),
+    }
+}
+
+fn record_error(span: &tracing::Span, error: &Error) {
+    record_error_message(span, &error.to_string());
+}
+
+fn record_error_message(span: &tracing::Span, message: &str) {
+    span.record("langfuse.observation.level", "ERROR");
+    span.record("langfuse.observation.status_message", message);
+    span.record("otel.status_code", "ERROR");
+    span.record("otel.status_message", message);
 }
 
 fn function_calls(output: &[serde_json::Value]) -> Vec<ToolCall> {
@@ -550,6 +754,7 @@ mod tests {
                     input_tokens: 81,
                     output_tokens: 2,
                     total_tokens: 83,
+                    cached_input_tokens: 0,
                 },
             },
         ])]);

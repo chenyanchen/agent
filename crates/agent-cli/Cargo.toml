@@ -11,6 +11,7 @@ path = "src/main.rs"
 agent-core = { path = "../agent-core" }
 agent-tools = { path = "../agent-tools" }
 async-trait = "0.1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 pulldown-cmark = "0.13"
@@ -20,6 +21,12 @@ serde_json = "1"
 toml = "1.1"
 tokio = { version = "1", features = ["full"] }
 dirs = "6"
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", features = ["http-proto", "reqwest-blocking-client"] }
+opentelemetry_sdk = "0.32"
+tracing = "0.1"
+tracing-opentelemetry = "0.33"
+tracing-subscriber = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

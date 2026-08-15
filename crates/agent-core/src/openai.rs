@@ -95,6 +95,10 @@ fn parse_stream_event(event: serde_json::Value) -> Option<Result<Event, Error>> 
                     input_tokens: token("input_tokens"),
                     output_tokens: token("output_tokens"),
                     total_tokens: token("total_tokens"),
+                    cached_input_tokens: usage["input_tokens_details"]["cached_tokens"]
+                        .as_u64()
+                        .unwrap_or_default()
+                        .min(u32::MAX.into()) as u32,
                 },
             }))
         }
@@ -114,6 +118,10 @@ fn parse_stream_event(event: serde_json::Value) -> Option<Result<Event, Error>> 
 
 #[async_trait::async_trait]
 impl Model for OpenAIModel {
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model_id)
+    }
+
     async fn stream(&self, request: Request) -> Result<StreamResponse, Error> {
         let body = request_body(&self.model_id, request);
         let stream: OpenAIStream<serde_json::Value> = self
@@ -167,7 +175,8 @@ mod tests {
                 "usage": {
                     "input_tokens": 11,
                     "output_tokens": 2,
-                    "total_tokens": 13
+                    "total_tokens": 13,
+                    "input_tokens_details": {"cached_tokens": 7}
                 }
             }
         });
@@ -179,7 +188,8 @@ mod tests {
                 usage: Usage {
                     input_tokens: 11,
                     output_tokens: 2,
-                    total_tokens: 13
+                    total_tokens: 13,
+                    cached_input_tokens: 7
                 }
             }
         ));

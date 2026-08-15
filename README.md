@@ -47,6 +47,14 @@ api_key  = "sk-..."
 
 [guard]
 mode = "confirm"   # default; medium/high-risk tools require confirmation
+
+# Optional local Langfuse tracing. Run dev/observability/setup.sh to generate
+# the endpoint and project keys for these fields.
+[observability]
+enabled = false
+endpoint = "http://localhost:3000/api/public/otel/v1/traces"
+# public_key = "pk-lf-..."
+# secret_key = "sk-lf-..."
 ```
 
 CLI flags override the config file:
@@ -133,6 +141,16 @@ agent.run("List files in /tmp", &my_handler).await?;
 
 Implement your own `Tool`, `Guard`, `Storage`, or `Model` to extend the
 agent with custom capabilities.
+
+## Local observability
+
+Run `./dev/observability/setup.sh` to start a local Langfuse v4 stack and print the configuration to add to `~/.agent/config.toml`. Once enabled, every Agent turn records the complete model request, discovered skills, tool calls, model output, token/cache usage, errors, and compaction activity. See [`dev/observability/README.md`](dev/observability/README.md) for setup and data-handling details.
+
+Verify the connection with:
+
+```sh
+cargo run -p agent-cli -- observability-check
+```
 
 ## Development
 
