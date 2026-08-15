@@ -292,6 +292,24 @@ fn restore_chat_history(messages: Vec<Message>) -> Vec<ChatEntry> {
 
 // ── Main event loop ───────────────────────────────────────────────────────────
 
+struct RedrawGate {
+    requested: bool,
+}
+
+impl RedrawGate {
+    fn new() -> Self {
+        Self { requested: true }
+    }
+
+    fn request(&mut self) {
+        self.requested = true;
+    }
+
+    fn take(&mut self) -> bool {
+        std::mem::take(&mut self.requested)
+    }
+}
+
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -299,12 +317,12 @@ async fn run_loop(
     event_rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
     confirmation_rx: &mut mpsc::UnboundedReceiver<ConfirmationRequest>,
 ) -> io::Result<()> {
+    let mut redraw = RedrawGate::new();
     loop {
-        terminal.draw(|f| ui::draw(f, app))?;
-
         // Drain all pending agent events (non-blocking).
         while let Ok(agent_event) = event_rx.try_recv() {
             handle_agent_event(app, agent_event);
+            redraw.request();
         }
         while let Ok(request) = confirmation_rx.try_recv() {
             app.confirmation = Some(PendingConfirmation::new(
@@ -312,12 +330,18 @@ async fn run_loop(
                 request.input,
                 request.response,
             ));
+            redraw.request();
+        }
+
+        if redraw.take() {
+            terminal.draw(|f| ui::draw(f, app))?;
         }
 
         // Poll for terminal input with a short timeout so we stay responsive
         // to both keyboard events and agent streaming events.
         if event::poll(Duration::from_millis(50))? {
             let terminal_event = event::read()?;
+            redraw.request();
             if let Event::Key(key) = terminal_event
                 && handle_confirmation_key(app, key)
             {
@@ -574,6 +598,18 @@ impl Handler for TuiHandler {
 mod tests {
     use super::*;
     use agent_core::ToolCall;
+
+    #[test]
+    fn redraw_gate_stays_idle_until_an_update_requests_a_redraw() {
+        let mut redraw = RedrawGate::new();
+
+        assert!(redraw.take(), "the initial frame must be drawn");
+        assert!(!redraw.take(), "an idle loop must not redraw");
+
+        redraw.request();
+        assert!(redraw.take(), "state updates must trigger one redraw");
+        assert!(!redraw.take(), "the request must be consumed");
+    }
 
     #[test]
     fn confirmation_defaults_to_deny_and_can_be_allowed() {
