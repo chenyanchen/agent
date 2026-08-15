@@ -19,5 +19,9 @@ pub struct Request {
 
 #[async_trait::async_trait]
 pub trait Model: Send + Sync {
+    fn model_name(&self) -> Option<&str> {
+        None
+    }
+
     async fn stream(&self, request: Request) -> Result<StreamResponse, Error>;
 }

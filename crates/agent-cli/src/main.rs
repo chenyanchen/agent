@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod input;
 mod markdown;
+mod telemetry;
 mod ui;
 
 use std::fs;
@@ -33,11 +34,13 @@ struct Cli {
 enum Command {
     /// List saved sessions
     Sessions,
+    /// Send a test trace to the configured local Langfuse instance
+    ObservabilityCheck,
 }
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
-    if matches!(cli.command, Some(Command::Sessions)) {
+    if matches!(cli.command.as_ref(), Some(Command::Sessions)) {
         for session in session_names(&app::sessions_dir()?)? {
             println!("{session}");
         }
@@ -57,7 +60,16 @@ fn main() -> io::Result<()> {
         cfg.guard.mode = config::GuardMode::Auto;
     }
 
-    app::App::run(cfg, cli.session)
+    let telemetry = telemetry::Telemetry::init(&cfg.observability).map_err(io::Error::other)?;
+    if matches!(cli.command.as_ref(), Some(Command::ObservabilityCheck)) {
+        telemetry::emit_check();
+        telemetry.shutdown();
+        println!("test trace sent to {}", cfg.observability.endpoint);
+        return Ok(());
+    }
+    let result = app::App::run(cfg, cli.session);
+    telemetry.shutdown();
+    result
 }
 
 fn session_names(dir: &Path) -> io::Result<Vec<String>> {
