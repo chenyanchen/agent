@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
+
+const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 use agent_core::{Error, RiskLevel, Tool, ToolOutput};
 
@@ -29,7 +32,13 @@ impl Tool for ShellTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "The shell command to execute." }
+                "command": { "type": "string", "description": "The shell command to execute." },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": DEFAULT_TIMEOUT_MS,
+                    "description": "Timeout in milliseconds. Defaults to 120000 (120 seconds)."
+                }
             },
             "required": ["command"]
         })
@@ -45,14 +54,25 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Tool("missing 'command' field".to_string()))?;
 
-        let output = tokio::process::Command::new("sh")
+        let timeout_ms = match input.get("timeout") {
+            Some(value) => value.as_u64().filter(|value| *value > 0).ok_or_else(|| {
+                Error::Tool("'timeout' must be a positive integer in milliseconds".to_string())
+            })?,
+            None => DEFAULT_TIMEOUT_MS,
+        };
+
+        let mut process = tokio::process::Command::new("sh");
+        process
             .arg("-c")
             .arg(command)
             .stdin(Stdio::null())
             .current_dir(&self.workdir)
             .env("GIT_EDITOR", "true")
-            .output()
+            .kill_on_drop(true);
+
+        let output = tokio::time::timeout(Duration::from_millis(timeout_ms), process.output())
             .await
+            .map_err(|_| Error::Tool(format!("command timed out after {timeout_ms}ms")))?
             .map_err(|e| Error::Tool(format!("failed to execute command: {e}")))?;
 
         if output.status.success() {
@@ -90,6 +110,46 @@ mod tests {
         let input = serde_json::json!({ "command": "false" });
         let output = tool.call(input).await.unwrap();
         assert!(output.to_string().contains("exit code"));
+    }
+
+    #[tokio::test]
+    async fn command_times_out() {
+        let tool = ShellTool::new(".");
+        let started = std::time::Instant::now();
+        let error = tool
+            .call(serde_json::json!({
+                "command": "exec sleep 10",
+                "timeout": 50
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Tool(message) if message == "command timed out after 50ms"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn timeout_must_be_a_positive_integer() {
+        let tool = ShellTool::new(".");
+
+        for timeout in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            let error = tool
+                .call(serde_json::json!({ "command": "true", "timeout": timeout }))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::Tool(message) if message.contains("positive integer")));
+        }
+    }
+
+    #[test]
+    fn timeout_defaults_to_120_seconds() {
+        let schema = ShellTool::new(".").schema();
+        assert_eq!(schema["properties"]["timeout"]["default"], 120_000);
+        assert!(schema["properties"]["timeout"].get("maximum").is_none());
     }
 
     #[tokio::test]
