@@ -8,7 +8,7 @@ This directory runs Langfuse v4 locally for Agent development. The Compose file 
 ./dev/observability/setup.sh
 ```
 
-The script creates the ignored `dev/observability/.env` on first run, starts Langfuse, prints the local login, and prints the `[observability]` block to add to `~/.agent/config.toml`.
+The script creates the ignored `dev/observability/.env` on first run, starts Langfuse, prints the local login, and prints the `[observability]` block to add to `~/.agent/config.toml`. All services use `restart: "no"`, so they do not start automatically when Docker starts; they run only after this script (or an explicit `docker compose up`) is invoked.
 
 Open <http://localhost:3000>. The initialized project is **Agent Development**.
 
